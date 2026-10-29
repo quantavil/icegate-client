@@ -159,6 +159,28 @@ provide a timezone), independent of the computer’s timezone.
 Workflow commands accept `--json`, `--env-file`, `--state-dir`,
 `--no-journal` and `-v`.
 
+## Sign and prepare a plan
+
+On Linux or macOS, `scripts/sign-and-plan.sh` uses the private
+`~/Downloads/Signer/sign-all.sh` utility and the separately installed
+`icegate-sign` to sign only the named files. It creates `_Signed` files next
+to the inputs, refuses existing outputs and runs a local dry run. It does not
+upload or submit anything.
+
+```bash
+scripts/sign-and-plan.sh pdf --type 331000 -- invoice.pdf
+scripts/sign-and-plan.sh filing -- declaration.sb
+```
+
+Use the signed file paths and the printed challenge in the corresponding
+`icegate esanchit submit --confirm ...` or `icegate filing upload --confirm ...`
+command after reviewing the plan. The document code above is an example; use
+the correct code for your documents. The wrapper accepts multiple files of the
+same kind; PDF files in a batch share the specified code. It uses `uv` from
+PATH and runs the client from this checkout. The signer script remains private
+and outside this repository; `ICEGATE_SIGN_SCRIPT` can point to another private
+copy. Signing errors stop the workflow before planning.
+
 The previous top-level `handoff`, `stage`, `submit`, and `doc-types` commands
 remain available for compatibility.
 
