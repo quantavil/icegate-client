@@ -1,0 +1,275 @@
+eSanchit Document Codes	
+Document Code	Document Name
+001000	Certificate of analysis
+001002	Lab analysis Report
+001003	Blood Analysis Report
+0010DC	Certificate of analysis - Drug
+0010FS	Certificate of Analysis - Food & Supplement
+001AQ1	Laboratory reports/certificate of analysis(COA)
+002000	Certificate of conformity
+003000	Certificate of quality
+003001	Product Approval
+0030DC	Batch Release Certificate
+004000	Test report
+004001	Test Certificate
+005000	Price/sales catalogue
+006000	Product specification report
+006001	Technical Writeup/ Literature
+011000	Federal label approval
+0110DC	Label of Consignment
+0110FS	Copy of Label
+022CO1	Self-Declaration on Customs Cases
+0380AQ	Vaccination certificate
+039PP1	Valid Passport
+046L01	Bank Letter or Certificate
+046PB1	Photo Passbook of Running Bank Account
+0530HZ	Safety and hazard data sheet
+101000	Registration Document
+101001	Importer Exporter Certificate
+101002	Receipt Letter
+1010DC	Registration Certificate
+101AA1	AADHAAR ID-UID
+101AP6	Registration cum Allocation Certificate for the Export of ¿Basmati Rice¿
+101AP8	Registration of Import contract for import of Sugar
+101AQ1	Advance No Objection Certificate
+101AR1	Renewal of Recognition of Scientific and Industrial Research Organisation (SIROs)
+101AR2	Certificate of Importer-Exporter Code
+101BIS	Registration Certificate
+101BN2	Manufacturing License
+101BN3	Quota Allocation for Narcotic Drugs
+101CH1	Receipt Letter
+101CP1	Registration Certificate
+101DC1	Registration Certificate (Drugs)
+101DC2	Registration Certificate (Cosmetics)
+101DC5	Registration Certificate (Medical Devices)
+101DE1	License for Handling Prescribed Substances
+101DG1	Customs Duty Exemption Certificate
+101EC1	Election Commision Photo ID
+101EI2	Health Certificate of Fish & Fishery Products (Frozen and Fresh/Chilled)
+101EI3	Certificate of Inspection & Health Certificate of Dried Fish
+101EI4	Health certificate of Live Fish
+101HE2	For renewal of e-rcmc
+101LM1	Certificate of Registration of Importer of Weights and Measures
+101MA1	Test Certificate
+101ME1	No Objection Certificate for Import of medical Equipment (Robotic Surgical Equipment)
+101ME2	No Objection Certificate for Import of used test equipments (Hardware)
+101ME3	No Objection Certificate for Import of Lead Scrap
+101ME4	No Objection Certificate for Import of used Rubber tyres
+101ME5	No Objection Certificate for Import of used Oil
+101ME6	No Objection Certificate for Import of Polysiloxane waste and other e-waste for making various grades of silicon fluid
+101MP2	EU Catch Certificate
+101MP3	Non - EU Catch Certificate
+101MP4	COO MPEDA
+101MP5	Non Radio-Activity Certificate
+101MP6	Duty free Import Certificate
+101PAY	Payment Receipt
+101PQ1	Nursery registration
+101RN1	Certificate of Registration
+101SB3	Mandatory Sampling & Testing for export of spices & spice products
+101SB4	Registration as Exporter under REX self-certification system
+101SB5	SAMPLE DRAWN CERTIFICATE
+101SB6	Yield Recommendation
+101SR2	Current Shipment Request
+101ST1	No Objection Certificate
+101TB1	Business License for Carrying Business as Distributor
+101TO2	Registration-Cum-Membership Certificate [RCMC]
+101TO5	Form of certificate of registration as processor or manufacturer of Virginia tobacco/as exporter of tobacco (Form 14)
+101WP1	The Equipment Type Approval Certificate
+101WP3	Decision to grant W/T License (New/Additional/Revised)
+101WP4	Issue Wireless Station License
+101WP5	Wireless Station License Authorization
+102000	SEZ Registration Document
+102IT1	Income Tax Assessment Order
+102PQ1	Seed dealer license
+103PQ1	Trial completed certificate issed by ICAR
+105000	Purchase order
+149RA1	Rental Agreement
+149SL1	Contract-MoU-Agreement With Foreign Shipping Lines
+165000	Bond
+250000	Crew list declaration
+2670PQ	Fumigation certificate
+271000	Packing list
+293000	Inspection report
+298000	Dangerous goods list
+315000	Contract
+315HS1	High Sea Sale Agreement
+325000	Proforma invoice
+331000	Commercial invoice which includes a packing list
+380000	Commercial Invoice
+380EB1	Electricity Bill
+380GB1	Gas Connection Bill
+380HS1	High Sea Sale Invoice
+380TB1	Telephone Bill
+380WB1	Water Bill
+430000	Banker's guarantee
+465000	Documentary credit
+520000	Insurance certificate
+626WC3	Capitive Bred/ artifically propogated Certificate
+627000	Free Sale Certificate in the Country of Origin
+629000	Veterinary quarantine certificate
+636000	Health certificate
+6360AQ	Health certificate
+636AQ1	Health Certificate for Livestock
+636AQ2	Health Certificate for Livestock Products
+636SB1	Health Certificate
+637000	Food grade certificate
+648000	Certificate of compliance with standards of the World Organization for Animal Health (OIE)
+649000	Production facility license
+6490DC	Certified copy of the licensed premises
+6490HZ	Consent to Operate/ Registration
+651000	Manufacturing license
+651001	Indusrtial License
+6570FS	Food grade certificate
+6570PQ	Phytosanitary Re-export Certificate
+700000	Waybill
+703000	House waybill
+704000	Master bill of lading
+705000	Bill of lading
+708000	Empty container bill
+709000	Tanker bill of lading
+710000	Sea waybill
+711000	Inland waterway bill of lading
+711AQ1	Letter of guarantee Certificate
+711CD1	Letter of guarantee Certificate
+713000	Mate's receipt
+714000	House bill of lading
+720000	Rail consignment note (generic term)
+730000	Road consignment note
+740000	Air waybill
+741000	Master air waybill
+744000	Crew's effects declaration
+745000	Passenger list
+780000	Freight Invoice
+788000	Container manifest (unit packing list)
+7880FS	Container Stuffing Report
+797000	Maritime declaration of health
+798000	Certificate of registry
+799000	Ship's stores declaration
+811000	Export licence
+811DC2	Import (Test Licence for Medical device)
+811DC3	FORM CT-16 CDSCO
+811DC4	Dual Use NOC
+811DC5	MD-21
+811DF1	Permit import of LP by DAHDF
+811WP2	License to Import Wireless Transmitting and / or Receiving Apparatus into India
+830A21	Assessment Copy SB
+830G35	Gatepass Copy SB
+830L22	Let Export Copy SB
+830RV1	Exports Revision Copy
+851000	Phyto Sanitary Certificates (PSCs) by other NPPOs
+8510FS	Phytosanitary certificate
+8511FS	Health Certificate
+852000	Sanitary certificate
+8520AQ	Saniary Import Permit
+8520PQ	Phyosanitory Import Permit
+853000	Veterinary certificate
+853AQ1	Veterinary Health Certificate
+856000	Inspection certificate
+856001	Pre Shipment Inspection Certificate
+858CS1	CSM Image
+858EX1	Examination Images
+858EX2	Export Exmaination Images
+861000	Certificate of origin
+861001	COO-CEPA(Singapore)
+861002	COO-PTA(Chile)
+861003	COO-FTA(Srilanka)
+861004	COO-PTA(Malaysia)
+861005	COO-PTA(Korea
+861006	COO-PTA(ASEAN)
+861007	COO-SAFTA
+861008	COO-PTA(Mercosur)
+861009	COO-PTA(Afghanistan)
+861010	COO-APTA
+861011	COO-PTA(SAARC)
+861012	COO-PTA(Thailand)
+861013	COO-PTA(LDC)
+861014	COO-GSP
+861015	COO-CEPA(Japan)
+861016	COO-CECPA(Mauritius)
+861017	COO-CEPA(UAE)
+861018	COO-ECTA(Australia)
+861CA2	Certificate of Origin (Asia Pacific Trade Agrement (APTA))
+861IE2	Preferential Certificate of Origin (APTA or SAPTA)* by DGFT
+861SB1	COO for spices
+861SF2	Country of Origin certificate (COO)
+861SR2	Certificate of Origin
+864000	Preference certificate of origin
+865000	Certificate of origin form GSP
+870000	Consular invoice
+890000	Dangerous goods declaration
+911000	Import licence
+911001	FSSAI Import License
+9111DC	Import Licence for Drugs
+911AB1	No objection Certificate for Procurement of Radiation Source
+911AP1	Certificate of Export
+911BN2	Import Certificate for import of Narcotic Drugs
+911CI3	Import Permit for Non-Insecticidal use
+911CI5	Endorsement Certificate
+911DA3	No Objection for Import/Procurement of Aircraft/Helicopter for Operating Air Transport Services
+911DF1	Sanitary Import Permit
+911FT0	DGFT Licenses/Scrips
+911ME1	Permission for Export of e-waste
+911MP1	Exporter Certificate Application MPEDA
+911PE1	Licence Form LE -8( Licence to Import explsovies)
+911PE2	License to Import Ammonium Nitrate (licence Form P-5)
+911PQ1	Import Permit
+911RB1	No Objection Certificate (NOC) for import of Natural Rubber
+911SR4	Export Performance Certificate (EPC)
+911TB1	CC for Tea Import by TB
+91WH01	Letter of Authorization
+91WH02	PDF copy of constitution
+91WH04	warehouse¿license
+91WH05	PDF copies of ID proof of Proprietor(s)/Partners/Directors
+91WH06	Property Holding Rights
+91WH07	Documents for Special¿Warehouse¿(Section 58A)
+91WH08	Copy of Ground Plan
+91WH09	Fire Safety Audit Certificate
+91WH10	Relevant Clearances and Permits
+91WH11	Solvency Certificate
+91WH12	Appointment letter of¿Warehouse¿keeper
+91WH13	Insurance Policy
+91WH14	Undertaking Under Section 73A
+91WH15	Indemnity undertaking
+91WH16	Undertaking to pay Cost Recovery charges
+929AS1	First Copy BE
+929G30	GatePass OOC Copy BE
+929G31	GatePass Grant Leave BE
+929G32	GatePass Allowed for Shipment BE
+929G33	GatePass Bond Transfer BE
+929OC1	OOC Copy BE
+929RV1	Imports Revision Copy
+934000	Value declaration (GATT Valuation Declaration)
+935000	Customs invoice
+955000	ATA carnet
+AQ0008	License with conditions
+CAVRJ3	Goods are J3 stock lot/ex stock
+CAVRMI	Manufacturer Invoice
+CAVRMP	Manufacturing process
+CAVRPO	Purchase Order or Contract
+CAVRTC	Test Certificate
+CR0001	CRO Exeption Certificate
+FSS001	End Usage Declaration - FSSAI
+FSS002	Ingredient details - FSSAI
+FSS003	Transit countries list if Food Articles have been transhipped - FSSAI
+FSS004	Ministry of Agriculture Permit - FSSAI
+FSS005	Ministry of Animal Husbandry Permit - FSSAI
+FSS006	Non-GM cum GM Free Certificate
+FSS007	Non-Food Declaration
+FSS008	Form - 12 (Annexure -2), Importer to move the food consignment to a well-equipped storage facility.
+FSS009	Form 13 - Imported articles of food having shelf-life less than seven days
+FSS010	Form 13A - Pre ¿¿¿pakaged retail food items
+FSS011	Imported Crude Oils (Edible grade) and Food Grains - FSSAI
+FSS012	Authorised Economic Operators (AEOs) - FSSAI
+FSS013	Quality and Safety Certificate issued by the competent authority of the donor country and agency
+FSS014	Registration or license or food safety certificate by the Authorized agencies of the country of origin
+FSS016	Food safety certificate for exhibition
+HAC001	Authorisation Letter
+HAC002	Detention Receipt
+HAC003	GJEPC Certificate
+HAC004	Photos
+HAC005	Declarations
+XXX000	Protocols Approval Letter
+XXX001	Narcotics Certificate
+XXX002	Stuffing List
+XXX003	Radio Activity report
+XXX0FS	Rejection Certificate

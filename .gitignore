@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.dist/
+*.egg-info/
+
+# Secrets and local state
+.env
+.env.*
+!.env.example
+*.jsonl
+*.pem
+!src/icegate_client/certs/*.pem
+
+# Documents
+*.pdf
+input/
+output/
+
+# Local page dumps (contain a session-scoped tabId)
+*.html
