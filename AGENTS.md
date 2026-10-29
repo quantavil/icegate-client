@@ -128,8 +128,10 @@ not necessarily a complete URL.
   document type.
 - Staged rows are session-scoped. A new handoff (new `JSESSIONID`/`tabId`)
   renders an empty queue, so stage and submit must share one process.
-- Submit: `POST /esanchit/submitDocs` with `tabId` and
-  `detailBean[N].docTyp` set to the full option string. The reusable client
+- Submit: `POST /esanchit/submitDocs` must be the browser's whole form:
+  multipart with an empty `docs` part, `tabId`, `finalSubmit` (empty), and per
+  row `fileName`, `drn`, `irn` (empty) and `docTyp` set to the full option
+  string. A urlencoded, trimmed form got HTTP 500 on 2026-10-29. The reusable client
   successfully submitted two signed test PDFs on 2026-10-29; response DRN,
   IRNs and signature status matched the confirmation email, which also
   confirmed type 331000 for each. Other response shapes remain unverified.
@@ -195,6 +197,29 @@ the Smart Gmail portal notes when a new response shape is observed.
 `--dump-html` writes the post-upload page to a mode-0600 file. It contains a
 session-scoped `tabId`, so keep it out of the repository and delete it when
 done.
+
+## Sign and upload (standing authorization)
+
+When the user says "sign and upload" files, do not ask for the token PIN.
+Signing goes through the user's script, which keeps the PIN inside itself
+(untracked, mode 700, outside this repo). Never print, echo, log or commit it.
+
+1. Copy or move the files into `~/Downloads/Signer`.
+2. Run `SIGN_ALL_IN_TERMINAL=1 ~/Downloads/Signer/sign-all.sh`. It signs every
+   unsigned `.pdf`, `.sb`, `.be`, `.txt`, `.xml` there and writes `name[signed].ext`.
+3. Upload only the `[signed]` files, each time as plan first, then confirm once:
+
+```bash
+uv run icegate filing upload --dry-run <signed .sb/.be>      # prints "challenge FILE N <id>"
+uv run icegate filing upload --confirm 'FILE N <id>' <same>  # SB/BE filing
+uv run icegate esanchit submit --dry-run --doc-type-map 'NAME=CODE' ... <signed pdfs>
+uv run icegate esanchit submit --confirm 'SUBMIT N <id>' --doc-type-map ... <same>
+```
+
+If signing fails with `PinIncorrect`, stop: more tries can lock the token. On a
+5xx or `unknown` outcome do not re-run; read `submit_error_body` in the run
+journal and check mail for the confirmation. Report DRN/IRNs or the HTTP status
+and receipt path; a filing 202 is not final, the filing-status email decides.
 
 ## Style
 

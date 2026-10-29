@@ -170,6 +170,25 @@ def test_submit_posts_document_types(service, session, signed_pdf, page):
     assert kwargs["data"]["tabId"] == "TAB0123456789"
 
 
+def test_submit_posts_the_whole_browser_form(service, session, signed_pdf, page):
+    """The portal returned HTTP 500 to a urlencoded, trimmed form that the
+    browser's own multipart submit (all fields, empty docs part) satisfied."""
+    plan = _plan([signed_pdf])
+    session._install(
+        [
+            FakeResponse(200, text=staged_html()),
+            FakeResponse(200, text=staged_html(drn="DRN123", irn="IRN456")),
+        ]
+    )
+    service.submit(plan, confirmation=plan.challenge, page=page)
+
+    kwargs = session.calls[1][2]
+    assert kwargs["data"]["finalSubmit"] == ""
+    assert kwargs["data"]["detailBean[0].drn"] == ""
+    assert kwargs["data"]["detailBean[0].irn"] == ""
+    assert kwargs["files"] == [("docs", ("", b"", "application/octet-stream"))]
+
+
 def test_submit_never_retries(service, session, signed_pdf, page):
     plan = _plan([signed_pdf])
     session._install(
@@ -531,3 +550,17 @@ def test_pending_journal_event_is_not_a_result(service, session, signed_pdf, pag
     events = [json.loads(line)['event'] for line in journal.path.read_text().splitlines()]
     assert events.count('submit_pending') == 1
     assert events.count('submit_result') == 1
+
+
+def test_server_error_body_is_journaled_redacted(service, session, signed_pdf, page, journal):
+    plan = _plan([signed_pdf])
+    session._install([
+        FakeResponse(200, text=staged_html()),
+        FakeResponse(500, text="<h1>Whitelabel Error</h1> boom"),
+    ])
+    receipt = service.submit(plan, confirmation=plan.challenge, page=page)
+
+    assert receipt.outcome.value == "unknown"
+    events = [json.loads(line) for line in journal.path.read_text().splitlines()]
+    body = next(e for e in events if e["event"] == "submit_error_body")
+    assert "Whitelabel Error" in body["excerpt"]

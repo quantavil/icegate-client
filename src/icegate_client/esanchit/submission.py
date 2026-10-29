@@ -36,6 +36,7 @@ from ..shared.errors import (
 from ..shared.files import write_private as _write_private
 from ..shared.files import write_receipt
 from ..shared.journal import Journal, now_iso
+from ..shared.redact import scrub
 from .client import EsanchitClient
 from .page import HomePage
 
@@ -245,8 +246,10 @@ class SubmissionService:
             detail="Submission may have been dispatched; reconcile with ICEGATE before retrying.",
         ), pending=True)
         try:
+            # The form is multipart; the browser includes an empty file part.
             response = self.client.post_form(
-                "submitDocs", data=fields, allowlist=SUBMIT_ALLOWLIST
+                "submitDocs", data=fields, allowlist=SUBMIT_ALLOWLIST,
+                files=[("docs", ("", b"", "application/octet-stream"))],
             )
         except Exception as exc:  # noqa: BLE001 - dispatch may have reached the portal
             receipt = self._receipt(
@@ -296,7 +299,9 @@ class SubmissionService:
         fields = dict(staged.hidden_fields)
         if staged.tab_id:
             fields["tabId"] = staged.tab_id
-        fields.setdefault("finalSubmit", "Submit")
+        # The browser posts the whole form: finalSubmit has no value and every
+        # row also carries its empty readonly drn/irn inputs.
+        fields.setdefault("finalSubmit", "")
         used_names = set()
         for row in staged.rows:
             name = row.select_name or ""
@@ -305,6 +310,9 @@ class SubmissionService:
             if name in used_names:
                 raise SubmitAborted(f"{row.file_name}: duplicate document type field; nothing submitted")
             used_names.add(name)
+            prefix = name.removesuffix(".docTyp")
+            fields.setdefault(f"{prefix}.drn", row.drn)
+            fields.setdefault(f"{prefix}.irn", row.irn)
             code = next(
                 (f.document_code for f in plan.files if f.name.lower() == row.file_name.lower()),
                 "",
@@ -315,6 +323,10 @@ class SubmissionService:
 
     def _interpret(self, plan: SubmitPlan, response) -> Receipt:
         status = getattr(response, "status_code", None)
+        if status is not None and status >= 500:
+            # The portal's error page is the only clue to why a submit failed.
+            body = " ".join((getattr(response, "text", "") or "").split())
+            self.journal.add("submit_error_body", status=status, excerpt=scrub(body[:600]))
         page = HomePage.parse(getattr(response, "text", "") or "")
 
         rows = [
