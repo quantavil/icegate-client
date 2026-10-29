@@ -13,6 +13,7 @@ dependencies = [
   "lxml>=6.1.3",
   "pyhanko>=0.38.0",
   "filelock>=4.2.4",
+  "tzdata; sys_platform == 'win32'",
 ]
 
 [project.scripts]

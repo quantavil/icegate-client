@@ -627,6 +627,11 @@ def cmd_ecopy_search(ctx: Context, _args: argparse.Namespace | None = None) -> i
 
 def cmd_ecopy_download(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     args = ctx.args
+    if args.copy_type == "ack":
+        if not args.filename or args.irn or args.user_id:
+            raise IcegateError("ack requires --filename, without --irn or --user-id")
+    elif not args.irn or not args.user_id or args.filename:
+        raise IcegateError("signed download requires --irn and --user-id, without --filename")
     path = Path(args.output).expanduser()
     if path.exists():
         raise IcegateError(f"output file already exists: {path}")
@@ -767,7 +772,8 @@ def _can_write(path: Path) -> bool:
 def cmd_init(ctx: Context | None, args: argparse.Namespace) -> int:
     target = write_env_template(Path(args.path).expanduser() if args.path else None, force=args.force)
     _say(f"created {target}")
-    _say("edit it, then run: chmod 600 " + str(target))
+    _say("edit it and restrict access to your user account" if os.name == "nt"
+         else "edit it, then run: chmod 600 " + str(target))
     return 0
 
 
@@ -784,7 +790,7 @@ def _add_esanchit_commands(sub, common):
 
     stage = sub.add_parser("stage", parents=[common], help="upload documents and stop before submit")
     stage.add_argument("files", nargs="+", help="already-signed PDF files")
-    stage.add_argument("--doc-type", help="document code applied to every file")
+    stage.add_argument("--type", "--doc-type", dest="doc_type", help="document code applied to every file")
     stage.add_argument("--doc-type-map", action="append", metavar="FILE=CODE", help="per-file document code")
     stage.add_argument("--dry-run", action="store_true", help="validate and stop before any network call")
     stage.add_argument("--append", action="store_true", help="allow uploading when rows are already staged")
@@ -804,7 +810,7 @@ def _add_esanchit_commands(sub, common):
         help="upload and submit in one run (irreversible; prints a challenge first)",
     )
     submit.add_argument("files", nargs="+", help="already-signed PDF files")
-    submit.add_argument("--doc-type", help="document code applied to every file")
+    submit.add_argument("--type", "--doc-type", dest="doc_type", help="document code applied to every file")
     submit.add_argument("--doc-type-map", action="append", metavar="FILE=CODE", help="per-file document code")
     submit.add_argument("--confirm", metavar="CHALLENGE", help="the exact challenge printed by the plan step")
     submit.add_argument("--dry-run", action="store_true", help="print the plan and challenge only")
@@ -840,14 +846,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="icegate",
-        description="Browser-free ICEGATE client for eSANCHIT and electronic filing.",
+        description="Unofficial browser-free ICEGATE client for eSANCHIT and electronic filing.",
     )
     parser.add_argument("--version", action="version", version=f"icegate-client {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("login", parents=[common], help="log in and verify the dashboard").set_defaults(func=cmd_login)
     sub.add_parser("status", parents=[common], help="log in, refresh and probe").set_defaults(func=cmd_status)
-    _add_esanchit_commands(sub, common)
     esanchit = sub.add_parser("esanchit", help="eSANCHIT document operations")
     esanchit_sub = esanchit.add_subparsers(dest="esanchit_command", required=True)
     _add_esanchit_commands(esanchit_sub, common)
@@ -863,28 +868,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     ecopy = sub.add_parser("ecopy", help="search Shipping Bill and Bill of Entry records")
     ecopy_sub = ecopy.add_subparsers(dest="ecopy_command", required=True)
+    def add_search_options(search):
+        search.add_argument("--from", dest="start_date", type=_date_arg, help="start date, YYYY-MM-DD")
+        search.add_argument("--to", dest="end_date", type=_date_arg, help="end date, YYYY-MM-DD")
+        relative = search.add_mutually_exclusive_group()
+        relative.add_argument("--today", dest="relative_date", action="store_const", const="today", help="search today's date in India")
+        relative.add_argument("--yesterday", "--yestarday", dest="relative_date", action="store_const", const="yesterday", help="search yesterday's date in India")
+        search.add_argument("--location", help="customs location code for a job search")
+        search.add_argument("--job-number", help="job number for a job search")
+        search.add_argument("--job-date", type=_date_arg, help="job date, YYYY-MM-DD")
+        search.set_defaults(func=cmd_ecopy_search)
+
     search = ecopy_sub.add_parser("search", parents=[common], help="search by date range or job details")
     search.add_argument("kind", choices=["SB", "BE"], help="document type")
-    search.add_argument("--from", dest="start_date", type=_date_arg, help="start date, YYYY-MM-DD")
-    search.add_argument("--to", dest="end_date", type=_date_arg, help="end date, YYYY-MM-DD")
-    relative = search.add_mutually_exclusive_group()
-    relative.add_argument("--today", dest="relative_date", action="store_const", const="today", help="search today's date in India")
-    relative.add_argument("--yesterday", "--yestarday", dest="relative_date", action="store_const", const="yesterday", help="search yesterday's date in India")
-    search.add_argument("--location", help="customs location code for a job search")
-    search.add_argument("--job-number", help="job number for a job search")
-    search.add_argument("--job-date", type=_date_arg, help="job date, YYYY-MM-DD")
-    search.set_defaults(func=cmd_ecopy_search)
-    download = ecopy_sub.add_parser("download", help="download an acknowledgement or signed copy")
-    download_sub = download.add_subparsers(dest="copy_type", required=True)
-    ack = download_sub.add_parser("ack", parents=[common], help="download an acknowledgement")
-    ack.add_argument("--filename", required=True, help="downloadUrl filename from an e-copy search")
-    ack.add_argument("--output", required=True, help="destination file; existing files are not overwritten")
-    ack.set_defaults(func=cmd_ecopy_download)
-    signed = download_sub.add_parser("signed", parents=[common], help="download a signed PDF")
-    signed.add_argument("--irn", required=True, help="IRN from an e-copy search")
-    signed.add_argument("--user-id", required=True, help="userId from the same search record")
-    signed.add_argument("--output", required=True, help="destination PDF; existing files are not overwritten")
-    signed.set_defaults(func=cmd_ecopy_download)
+    add_search_options(search)
+    for kind in ("SB", "BE"):
+        shortcut = ecopy_sub.add_parser(kind.lower(), parents=[common], help=f"search {kind} records")
+        add_search_options(shortcut)
+        shortcut.set_defaults(kind=kind)
+
+    download = ecopy_sub.add_parser("download", parents=[common], help="download a signed PDF or acknowledgement")
+    download.add_argument("copy_type", nargs="?", choices=["signed", "ack"], default="signed")
+    download.add_argument("--filename", help="downloadUrl filename for an acknowledgement")
+    download.add_argument("--irn", help="IRN from an e-copy search")
+    download.add_argument("--user-id", help="userId from the same search record")
+    download.add_argument("-o", "--output", required=True, help="destination; existing files are not overwritten")
+    download.set_defaults(func=cmd_ecopy_download)
 
     doctor = sub.add_parser("doctor", parents=[common], help="check configuration and TLS")
     doctor.set_defaults(func=lambda ctx, args: cmd_doctor(None, args))

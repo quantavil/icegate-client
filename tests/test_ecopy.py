@@ -1,3 +1,4 @@
+import os
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -136,7 +137,8 @@ def test_cli_download_signed_writes_private_pdf_without_overwriting(tmp_path, mo
             '--output', str(output), '--json', '--state-dir', str(tmp_path / 'state')]
     assert cli.main(args) == 0
     assert json.loads(capsys.readouterr().out)['bytes'] == len(output.read_bytes())
-    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert cli.main(args) == 1
     assert output.read_bytes() == b'%PDF-1.7\nexample'
 

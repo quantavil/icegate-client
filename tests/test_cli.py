@@ -10,18 +10,26 @@ from icegate_client.esanchit.doc_types import DocumentCatalog
 
 def test_unavailable_pdf_trust_option_is_not_exposed():
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["submit", "a.pdf", "--require-trusted"])
+        build_parser().parse_args(["esanchit", "submit", "a.pdf", "--require-trusted"])
 
 
 def test_catalog_includes_alphanumeric_portal_codes():
     assert DocumentCatalog.load().get("101TO2") is not None
 
 
+def test_short_search_and_download_commands():
+    parser = build_parser()
+    assert parser.parse_args(["ecopy", "sb", "--yesterday"]).kind == "SB"
+    assert parser.parse_args(["ecopy", "be", "--today"]).kind == "BE"
+    args = parser.parse_args(["ecopy", "download", "--irn", "123", "--user-id", "id", "-o", "a.pdf"])
+    assert args.copy_type == "signed" and args.output == "a.pdf"
+    assert parser.parse_args(["esanchit", "submit", "a.pdf", "--type", "331000"]).doc_type == "331000"
+
+
 def test_nested_esanchit_commands_keep_existing_handlers():
     parser = build_parser()
     nested = parser.parse_args(["esanchit", "submit", "a.pdf", "--doc-type", "331000", "--dry-run"])
-    old = parser.parse_args(["submit", "a.pdf", "--doc-type", "331000", "--dry-run"])
-    assert nested.func is old.func
+    assert nested.func is cli.cmd_submit
 
 
 def test_filing_dry_run_plans_signed_file_without_network(tmp_path, monkeypatch, capsys):
@@ -75,7 +83,7 @@ def test_submit_plan_uses_same_bytes_as_preflight(real_signed_pdf, monkeypatch, 
     monkeypatch.setenv("ICEGATE_USERNAME", "test")
     monkeypatch.setenv("ICEGATE_PASSWORD", "test")
     result = cli.main([
-        "submit", str(real_signed_pdf), "--doc-type", "101000", "--dry-run",
+        "esanchit", "submit", str(real_signed_pdf), "--doc-type", "101000", "--dry-run",
         "--state-dir", str(tmp_path / "state"), "--json",
     ])
     assert result == 0
@@ -92,7 +100,7 @@ def test_submit_dry_run_preserves_explicit_signature_override(request, fixture, 
     monkeypatch.setenv("ICEGATE_USERNAME", "test")
     monkeypatch.setenv("ICEGATE_PASSWORD", "test")
     assert cli.main([
-        "submit", str(file), "--doc-type", "101000", "--dry-run", flag,
+        "esanchit", "submit", str(file), "--doc-type", "101000", "--dry-run", flag,
         "--state-dir", str(tmp_path / "state"),
     ]) == 0
 
@@ -101,7 +109,7 @@ def test_missing_pdf_reports_error_instead_of_traceback(monkeypatch, tmp_path, c
     monkeypatch.setenv("ICEGATE_USERNAME", "test")
     monkeypatch.setenv("ICEGATE_PASSWORD", "test")
     result = cli.main([
-        "submit", str(tmp_path / "missing.pdf"), "--doc-type", "101000", "--dry-run",
+        "esanchit", "submit", str(tmp_path / "missing.pdf"), "--doc-type", "101000", "--dry-run",
         "--state-dir", str(tmp_path / "state"),
     ])
     assert result == 1
@@ -111,7 +119,7 @@ def test_missing_pdf_reports_error_instead_of_traceback(monkeypatch, tmp_path, c
 def test_json_warnings_go_to_stderr(unsigned_pdf, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv('ICEGATE_USERNAME', 'test')
     monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
-    assert cli.main(['stage', str(unsigned_pdf), str(unsigned_pdf.parent / 'copy.pdf'),
+    assert cli.main(['esanchit', 'stage', str(unsigned_pdf), str(unsigned_pdf.parent / 'copy.pdf'),
                      '--dry-run', '--allow-unsigned', '--json', '--state-dir', str(tmp_path / 'state')]) == 1
     output = capsys.readouterr()
     assert not output.out
@@ -121,7 +129,7 @@ def test_json_warnings_go_to_stderr(unsigned_pdf, monkeypatch, tmp_path, capsys)
 def test_unmatched_document_map_is_rejected(unsigned_pdf, monkeypatch, tmp_path, capsys):
     monkeypatch.setenv('ICEGATE_USERNAME', 'test')
     monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
-    result = cli.main(['stage', str(unsigned_pdf), '--dry-run', '--allow-unsigned',
+    result = cli.main(['esanchit', 'stage', str(unsigned_pdf), '--dry-run', '--allow-unsigned',
                        '--doc-type', '331000', '--doc-type-map', 'typo.pdf=101000',
                        '--state-dir', str(tmp_path / 'state')])
     assert result == 1
@@ -141,7 +149,7 @@ def test_json_warning_does_not_contaminate_output(unsigned_pdf, monkeypatch, tmp
     monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
     other = tmp_path / 'copy.pdf'
     other.write_bytes(unsigned_pdf.read_bytes())
-    assert cli.main(['stage', str(unsigned_pdf), str(other), '--dry-run', '--allow-unsigned',
+    assert cli.main(['esanchit', 'stage', str(unsigned_pdf), str(other), '--dry-run', '--allow-unsigned',
                      '--json', '--state-dir', str(tmp_path / 'state')]) == 0
     result = capsys.readouterr()
     assert json.loads(result.out)['ok']
@@ -169,7 +177,7 @@ def test_stage_uploads_preflight_snapshot(unsigned_pdf, monkeypatch, tmp_path):
         unsigned_pdf.write_bytes(b'replacement')
         return report
     monkeypatch.setattr(cli, '_preflight_report', change_after_validation)
-    assert cli.main(['stage', str(unsigned_pdf), '--allow-unsigned', '--state-dir', str(tmp_path / 'state')]) == 0
+    assert cli.main(['esanchit', 'stage', str(unsigned_pdf), '--allow-unsigned', '--state-dir', str(tmp_path / 'state')]) == 0
 
 
 def test_close_failure_does_not_leak_traceback(unsigned_pdf, monkeypatch, tmp_path, capsys):
@@ -178,7 +186,7 @@ def test_close_failure_does_not_leak_traceback(unsigned_pdf, monkeypatch, tmp_pa
     def fail_close(self):
         raise OSError('sensitive detail')
     monkeypatch.setattr(cli.Context, 'close', fail_close)
-    assert cli.main(['stage', str(unsigned_pdf), '--allow-unsigned', '--dry-run', '--json',
+    assert cli.main(['esanchit', 'stage', str(unsigned_pdf), '--allow-unsigned', '--dry-run', '--json',
                      '--state-dir', str(tmp_path / 'state')]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out)['ok']

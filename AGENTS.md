@@ -11,8 +11,8 @@ queue, and can submit that queue in the same process to obtain DRN and IRN.
 The separate electronic filing module uploads already-signed SB/BE files; it
 does not sign or verify their DSC and does not claim final Customs acceptance.
 
-**Staging is reversible; submission is not.** `icegate stage` can only reach
-`uploadDocs`. `icegate submit` lives in `submission.py`, carries its own
+**Staging is reversible; submission is not.** `icegate esanchit stage` can only reach
+`uploadDocs`. `icegate esanchit submit` lives in `submission.py`, carries its own
 allowlist, and refuses to run without a challenge derived from the file
 hashes. Staging is ephemeral: the row lives in the current eSANCHIT
 `JSESSIONID`/`tabId` and is gone on the next handoff.
@@ -157,7 +157,7 @@ Before any live run:
 ```bash
 uv run icegate doctor --env-file <path>
 uv run icegate login --env-file <path>
-uv run icegate handoff --env-file <path>
+uv run icegate esanchit handoff --env-file <path>
 ```
 
 ## Live staging runs
@@ -166,7 +166,7 @@ A live upload requires **explicit user authorization** and a chosen,
 already-signed PDF. Run exactly one file first:
 
 ```bash
-uv run icegate stage <file> --doc-type <code> --dump-html /tmp/opencode/icegate-client/page.html
+uv run icegate esanchit stage <file> --doc-type <code> --dump-html /tmp/opencode/icegate-client/page.html
 ```
 
 The `--doc-type` value is cross-checked against that row's option list and
@@ -180,8 +180,8 @@ same session.
 Submission is irreversible and needs its own authorization, every time.
 
 ```bash
-uv run icegate submit <file> --doc-type <code> --dry-run      # plan + challenge
-uv run icegate submit <file> --doc-type <code> --confirm 'SUBMIT 1 <plan_id>'
+uv run icegate esanchit submit <file> --doc-type <code> --dry-run      # plan + challenge
+uv run icegate esanchit submit <file> --doc-type <code> --confirm 'SUBMIT 1 <plan_id>'
 ```
 
 Before the run: confirm the file is the right one, the SHA-256 prefix matches,

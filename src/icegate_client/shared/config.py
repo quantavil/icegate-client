@@ -59,6 +59,9 @@ def parse_env_file(path: Path) -> dict[str, str]:
 
 
 def check_env_file_permissions(path: Path) -> None:
+    # Windows access is controlled by ACLs, not POSIX mode bits.
+    if os.name == "nt":
+        return
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode & 0o077:
         raise ConfigError(

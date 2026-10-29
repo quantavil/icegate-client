@@ -2,7 +2,7 @@
 
 Licensed under GPL-3.0-or-later; see [LICENSE](LICENSE).
 
-Browser-free client for ICEGATE, eSANCHIT and electronic filing. It logs in with the same
+Unofficial browser-free client for ICEGATE, eSANCHIT and electronic filing. It logs in with the same
 endpoints the portal's own JavaScript uses, refreshes the dashboard token,
 performs the dashboard to eSANCHIT handoff, uploads already-signed PDFs, and
 can submit one staged batch to obtain the DRN and IRN. Electronic filing
@@ -11,7 +11,7 @@ uploads already-signed SB/BE files and reports the portal's initial response.
 See the [file-upload research](docs/electronic-filing.md) for observed portal
 behavior and the distinction between upload acceptance and Customs processing.
 
-**Staging uploads files; submission creates portal records.** `icegate submit`
+**Staging uploads files; submission creates portal records.** `icegate esanchit submit`
 requires a challenge string derived from the file hashes before it sends
 anything. Staging is scoped to the current eSANCHIT session: the queue is empty
 again on the next handoff, so upload and submit must happen in one process.
@@ -27,7 +27,7 @@ restart means a fresh login, and the eSANCHIT session expires after roughly ten
 minutes of inactivity. This client removes the browser from the loop:
 
 - no browser process, profile or cookie store;
-- credentials read from a local mode-0600 file;
+- credentials read from a local file;
 - direct login with the configured ICEGATE credentials;
 - a journal designed to redact secrets.
 
@@ -45,21 +45,24 @@ minutes of inactivity. This client removes the browser from the loop:
 
 ## Install
 
-```bash
-cd ~/Documents/icegate-client
-uv sync
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Python 3.11 or newer. From the repository directory on Linux, macOS or Windows:
+
+```sh
+uv tool install .
+icegate --help
 ```
+
+Run `uv tool update-shell` and restart the terminal if `icegate` is not on your PATH. For development, `uv sync` followed by `uv run icegate ...` also works.
 
 ## Configure
 
 ```bash
-uv run icegate init           # writes .env in the project root (mode 0600)
-$EDITOR .env
-uv run icegate doctor
+icegate init           # creates .env
+# Edit .env in your preferred text editor
+icegate doctor
 ```
 
-The client uses the ignored `icegate-client/.env` by default when run from the
-source checkout. It must not be group- or world-readable. An installed wheel
+When run from the source checkout, the client uses the ignored `icegate-client/.env` by default. On Linux and macOS it must not be group- or world-readable. On Windows, mode bits do not enforce privacy: put `.env` and the state directory in a folder whose Windows ACL permits only your account, and verify its permissions yourself. The client does not validate Windows ACLs. An installed wheel
 uses `.env` in the current directory by default.
 
 ```
@@ -75,25 +78,25 @@ command.
 ## Usage
 
 ```bash
-uv run icegate login                  # authenticate and probe the dashboard
-uv run icegate status                 # authenticate, rotate the token, probe again
-uv run icegate esanchit handoff       # open eSANCHIT and list staged rows
-uv run icegate esanchit doc-types "invoice" # search the bundled document codes
-uv run icegate esanchit stage a.pdf b.pdf --doc-type 331000
-uv run icegate esanchit stage a.pdf --dry-run  # local validation only
-uv run icegate esanchit submit a.pdf --doc-type 331000 --dry-run
-uv run icegate esanchit submit a.pdf --doc-type 331000 --confirm 'SUBMIT 1 <plan_id>'
-uv run icegate filing upload signed.sb --dry-run
-uv run icegate filing upload signed.sb --confirm 'FILE 1 <plan_id>'
-uv run icegate ecopy search SB --from 2026-10-01 --to 2026-10-28
-uv run icegate ecopy search SB --yesterday
-uv run icegate ecopy search BE --today
-uv run icegate ecopy search BE --location INMBD6 --job-number 123 --job-date 2026-10-28 --json
-uv run icegate ecopy download ack --filename <downloadUrl> --output acknowledgement.ack
-uv run icegate ecopy download signed --irn <irn> --user-id <userId> --output signed-copy.pdf
+icegate login                  # authenticate and probe the dashboard
+icegate status                 # authenticate, rotate the token, probe again
+icegate esanchit handoff       # open eSANCHIT and list staged rows
+icegate esanchit doc-types "invoice" # search the bundled document codes
+icegate esanchit stage a.pdf b.pdf --type 331000
+icegate esanchit stage a.pdf --dry-run  # local validation only
+icegate esanchit submit a.pdf --type 331000 --dry-run
+icegate esanchit submit a.pdf --type 331000 --confirm 'SUBMIT 1 <plan_id>'
+icegate filing upload signed.sb --dry-run
+icegate filing upload signed.sb --confirm 'FILE 1 <plan_id>'
+icegate ecopy search SB --from 2026-10-01 --to 2026-10-28
+icegate ecopy sb --yesterday
+icegate ecopy be --today
+icegate ecopy search BE --location INMBD6 --job-number 123 --job-date 2026-10-28 --json
+icegate ecopy download ack --filename <downloadUrl> --output acknowledgement.ack
+icegate ecopy download --irn <irn> --user-id <userId> -o signed-copy.pdf
 ```
 
-`ecopy search` retrieves Shipping Bill (`SB`) or Bill of Entry (`BE`) records
+`ecopy sb`, `ecopy be`, and `ecopy search` retrieve Shipping Bill (`SB`) or Bill of Entry (`BE`) records
 by date range, or by customs location, job number and job date. Dates use
 `YYYY-MM-DD`. Add `--json` for the complete portal records, including fields
 for available copies; the table shows job, document and location details.
@@ -106,8 +109,7 @@ The portal may restrict the permitted date range. Search only lists records. To
 download, use `--json` to find the `downloadUrl`, `irn`, and `userId` fields
 for the desired row, then use the corresponding `ecopy download` command above.
 Use the `irn` and `userId` from the same row. The signed action downloads a PDF;
-the acknowledgement action downloads the portal’s `.ack` file. Files are mode
-0600 and existing destinations are never overwritten. On 2026-10-29, live
+the acknowledgement action downloads the portal’s `.ack` file. On Linux and macOS files are mode 0600; on Windows they inherit folder ACLs, which you must restrict. Existing destinations are never overwritten. On 2026-10-29, live
 SB and BE signed PDF downloads succeeded. The acknowledgement endpoint
 returned HTTP 409 for six sampled files; availability remains uncertain.
 
@@ -145,7 +147,7 @@ Useful `stage` flags:
 | `--append` | allow uploading when rows are already staged |
 | `--allow-unsigned` | do not fail on missing signature markers |
 | `--strict-limits` | treat portal size and count limits as errors |
-| `--dump-html PATH` | save the post-upload page (mode 0600) for debugging |
+| `--dump-html PATH` | save the post-upload page (private permissions on POSIX) for debugging |
 
 Warnings and errors go to stderr; successful `--json` output goes to stdout.
 ICEGATE expiry date strings are interpreted as India time (the portal does not
@@ -250,12 +252,12 @@ A live upload on 2026-10-28 confirmed the shape of the queue:
 
 In short: staging validates the file and parks it in the current session. DRN,
 IRN, the signature verdict and the chosen document type are created only by
-`submitDocs`, which `icegate submit` posts in the same process.
+`submitDocs`, which `icegate esanchit submit` posts in the same process.
 
 ## Document type planning
 
 The portal's document-type options are full strings such as
-`101000-Registration Document`. `icegate doc-types` searches the same catalogue
+`101000-Registration Document`. `icegate esanchit doc-types` searches the same catalogue
 locally. `--doc-type` / `--doc-type-map` cross-check the requested codes
 against the options the row itself offers, then print them in a
 `planned type (not saved)` column.
@@ -282,7 +284,7 @@ The portal has no undo, so submission is a state machine rather than a request:
 5xx, or a 200 without a DRN. The client writes the receipt, prints where it is
 and exits 3. It never retries, because a retry can create a second DRN.
 
-Receipts are JSON, mode 0600, one per plan. `--allow-duplicate` is the only way
+Receipts are JSON, one per plan (mode 0600 on POSIX). `--allow-duplicate` is the only way
 to submit the same plan again, and it has to be typed on purpose.
 This guard only covers the same plan in the same state directory; it cannot
 detect submissions made elsewhere or plans with different names or codes.
@@ -299,7 +301,7 @@ plan or state directory.
 - The absolute server-side session cap beyond 35 minutes of refresh has not
   been measured.
 - Staged rows do not survive a new eSANCHIT session, so upload and submit must
-  run in one process; `icegate submit` does that by design.
+  run in one process; `icegate esanchit submit` does that by design.
 - The reusable client's two-file submission succeeded on 2026-10-29: both
   response rows reported successful signature verification and their DRN and
   IRNs matched the ICEGATE confirmation email, including both document types.
@@ -309,7 +311,9 @@ plan or state directory.
 ## Journal
 
 Each run writes `~/.local/state/icegate-client/runs/<timestamp>-<pid>.jsonl`,
-mode 0600. It records intent (file names, sizes, SHA-256, document codes),
+mode 0600 on POSIX. It records intent (file names, sizes, SHA-256, document codes),
 protocol outcomes (status codes, hop paths, query parameter *names*), and
 staged row identifiers. It never records tokens, session ids, OTPs, passwords,
 cookies or handoff URLs with their query strings.
+
+The former top-level `stage`, `submit`, `handoff`, and `doc-types` commands now live under `icegate esanchit`; update any scripts that used the old names.

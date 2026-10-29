@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import stat
 
 import pytest
@@ -84,10 +85,13 @@ def test_plan_requires_at_least_one_file():
 
 
 def test_dump_does_not_change_existing_directory_permissions(tmp_path):
-    tmp_path.chmod(0o755)
+    if os.name != "nt":
+        tmp_path.chmod(0o755)
     _write_private(tmp_path / "page.html", "test")
-    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
-    assert stat.S_IMODE((tmp_path / "page.html").stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o755
+    if os.name != "nt":
+        assert stat.S_IMODE((tmp_path / "page.html").stat().st_mode) == 0o600
 
 
 # -------------------------------------------------------------------- gates
@@ -139,7 +143,8 @@ def test_submit_returns_drn_and_irn(service, session, signed_pdf, page, journal)
 
     receipt_file = service.receipt_path(plan.plan_id)
     assert receipt_file.is_file()
-    assert stat.S_IMODE(receipt_file.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(receipt_file.stat().st_mode) == 0o600
     saved = json.loads(receipt_file.read_text(encoding="utf-8"))
     assert saved["outcome"] == "submitted"
 

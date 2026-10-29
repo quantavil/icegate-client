@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 
 import pytest
@@ -70,7 +71,8 @@ def test_upload_acceptance_is_not_final_filing(signed_sb, journal, tmp_path):
     assert request["headers"]["channel"] == "browser"
     receipt = service.receipt_path(plan.files[0].sha256)
     assert json.loads(receipt.read_text())["outcome"] == "accepted_for_processing"
-    assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
 
 
 def test_unknown_outcome_is_persisted_and_never_retried(signed_sb, journal, tmp_path):
