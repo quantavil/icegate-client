@@ -89,3 +89,73 @@ def test_relative_date_cannot_be_combined_with_explicit_range(tmp_path, monkeypa
     monkeypatch.setenv("ICEGATE_PASSWORD", "test")
     assert cli.main(["ecopy", "search", "SB", "--today", "--from", "2026-10-27",
                      "--to", "2026-10-28", "--state-dir", str(tmp_path)]) != 0
+
+
+def test_download_ack_uses_filename_and_authenticated_request():
+    session = FakeSession(None)
+    def send(method, url, **kwargs):
+        session.calls.append((method, url, kwargs))
+        return SimpleNamespace(status_code=200, content=b'acknowledgement', headers={'Content-Type': 'text/plain'})
+    session.send = send
+    assert ECopyClient(session).download_ack('record.ack') == b'acknowledgement'
+    _, url, kwargs = session.calls[0]
+    assert url.endswith('/dashboard-utility/download-utility/downloadAckFile')
+    assert kwargs['json_body'] == {'icegateId': 'TEST', 'fileName': 'record.ack'}
+
+
+def test_download_signed_uses_portal_irn_and_user_id():
+    session = FakeSession(None)
+    def send(method, url, **kwargs):
+        session.calls.append((method, url, kwargs))
+        return SimpleNamespace(status_code=200, content=b'%PDF-1.7\nexample', headers={'Content-Type': 'application/pdf'})
+    session.send = send
+    assert ECopyClient(session).download_signed('1234567890123456', 'USER') == b'%PDF-1.7\nexample'
+    _, url, kwargs = session.calls[0]
+    assert url.endswith('/esanchit/getDocument')
+    assert kwargs['json_body'] == {'irn': '1234567890123456', 'userId': 'USER'}
+
+
+def test_download_rejects_errors_and_non_pdf_signed_response():
+    session = FakeSession(None)
+    session.send = lambda *a, **kw: SimpleNamespace(status_code=200, content=b'{"error":"failure"}', headers={'Content-Type':'application/json'})
+    with pytest.raises(IcegateError):
+        ECopyClient(session).download_signed('1234567890123456', 'USER')
+    with pytest.raises(IcegateError):
+        ECopyClient(session).download_ack('record.ack')
+
+
+def test_cli_download_signed_writes_private_pdf_without_overwriting(tmp_path, monkeypatch, capsys):
+    import json
+    import stat
+    monkeypatch.setenv('ICEGATE_USERNAME', 'test')
+    monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
+    monkeypatch.setattr(cli.Context, 'authenticate', lambda self: None)
+    monkeypatch.setattr(ECopyClient, 'download_signed', lambda self, irn, user_id: b'%PDF-1.7\nexample')
+    output = tmp_path / 'signed.pdf'
+    args = ['ecopy', 'download', 'signed', '--irn', '1234567890123456', '--user-id', 'USER',
+            '--output', str(output), '--json', '--state-dir', str(tmp_path / 'state')]
+    assert cli.main(args) == 0
+    assert json.loads(capsys.readouterr().out)['bytes'] == len(output.read_bytes())
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert cli.main(args) == 1
+    assert output.read_bytes() == b'%PDF-1.7\nexample'
+
+
+def test_download_rejects_portal_http_error_without_retry():
+    session = FakeSession(None, status=409)
+    with pytest.raises(IcegateError, match='HTTP 409'):
+        ECopyClient(session).download_ack('record.ack')
+    assert len(session.calls) == 1
+
+
+def test_download_cli_does_not_create_file_after_portal_error(tmp_path, monkeypatch):
+    monkeypatch.setenv('ICEGATE_USERNAME', 'test')
+    monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
+    monkeypatch.setattr(cli.Context, 'authenticate', lambda self: None)
+    def fail(self, filename):
+        raise IcegateError('e-copy download failed with HTTP 409')
+    monkeypatch.setattr(ECopyClient, 'download_ack', fail)
+    output = tmp_path / 'record.ack'
+    assert cli.main(['ecopy', 'download', 'ack', '--filename', 'record.ack', '--output', str(output),
+                     '--state-dir', str(tmp_path / 'state')]) == 1
+    assert not output.exists()

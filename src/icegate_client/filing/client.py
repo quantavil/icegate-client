@@ -10,17 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
 from filelock import FileLock, Timeout
-from requests.exceptions import RequestException
 
 from ..shared.errors import DuplicateSubmit, IcegateError, SubmitBusy
+from ..shared.files import write_receipt
 from ..shared.journal import Journal, now_iso
 from ..shared.session import IcegateSession
 
@@ -125,7 +123,7 @@ class FilingService:
             raise FilingError("invalid file digest")
         return self.receipts_dir / f"{sha256}.json"
 
-    def submit(self, plan: FilingPlan, *, confirmation: str) -> list[FilingReceipt]:
+    def submit(self, plan: FilingPlan, *, confirmation: str, allow_duplicate: bool = False) -> list[FilingReceipt]:
         if (confirmation or "").strip() != plan.challenge:
             raise FilingError("confirmation does not match this filing plan; nothing was sent")
         if not self.session.token or not self.session.session_id:
@@ -144,7 +142,7 @@ class FilingService:
             for item in plan.files:
                 # Previous one-off research uploads used this state directory.
                 legacy = self.state_dir / "filing-tests" / f"{item.sha256}.json"
-                if self.receipt_path(item.sha256).exists() or legacy.exists():
+                if not allow_duplicate and (self.receipt_path(item.sha256).exists() or legacy.exists()):
                     raise DuplicateSubmit(
                         f"{item.name}: an attempt record already exists; reconcile before repeating"
                     )
@@ -160,7 +158,7 @@ class FilingService:
 
     def _upload(self, item: FilingFile) -> FilingReceipt:
         pending = self._receipt(item, FilingOutcome.UNKNOWN)
-        self._persist(pending)
+        self._persist(pending, pending=True)
         try:
             response = self.session.send(
                 "POST",
@@ -169,7 +167,7 @@ class FilingService:
                 headers=self.session.auth_headers(),
                 timeout=120,
             )
-        except (IcegateError, RequestException, OSError):
+        except Exception:  # noqa: BLE001 - dispatch may have reached the portal
             return pending
 
         status = getattr(response, "status_code", None)
@@ -195,23 +193,6 @@ class FilingService:
             outcome=outcome, http_status=status, at=now_iso(),
         )
 
-    def _persist(self, receipt: FilingReceipt) -> None:
-        self.receipts_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        target = self.receipt_path(receipt.sha256)
-        fd, temporary = tempfile.mkstemp(dir=self.receipts_dir, prefix=".receipt-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(receipt.as_dict(), handle, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, target)
-            directory_fd = os.open(self.receipts_dir, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-        self.journal.add("filing_result", **receipt.as_dict())
+    def _persist(self, receipt: FilingReceipt, *, pending: bool = False) -> None:
+        write_receipt(self.receipt_path(receipt.sha256), receipt.as_dict())
+        self.journal.add("filing_pending" if pending else "filing_result", **receipt.as_dict())

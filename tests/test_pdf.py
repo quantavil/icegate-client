@@ -223,3 +223,27 @@ def test_total_request_limit_is_reported(real_signed_pdf):
     (severity, message), = limit_messages([info], limits)
     assert severity == "warning"
     assert "total limit" in message
+
+
+def test_page_count_supports_compressed_object_stream(tmp_path):
+    import io
+
+    from pyhanko.pdf_utils import generic, writer
+
+    from icegate_client.esanchit.pdf import inspect_pdf
+    pdf = writer.PdfFileWriter()
+    stream = pdf.prepare_object_stream()
+    pages = pdf.root['/Pages']
+    page = generic.DictionaryObject({
+        generic.pdf_name('/Type'): generic.pdf_name('/Page'),
+        generic.pdf_name('/Parent'): pdf.root.raw_get('/Pages'),
+        generic.pdf_name('/MediaBox'): generic.ArrayObject([generic.NumberObject(n) for n in (0, 0, 100, 100)]),
+    })
+    page_ref = pdf.add_object(page, obj_stream=stream)
+    pages[generic.pdf_name('/Kids')] = generic.ArrayObject([page_ref])
+    pages[generic.pdf_name('/Count')] = generic.NumberObject(1)
+    out = io.BytesIO()
+    pdf.write(out)
+    path = tmp_path / 'compressed.pdf'
+    path.write_bytes(out.getvalue())
+    assert inspect_pdf(path).pages == 1

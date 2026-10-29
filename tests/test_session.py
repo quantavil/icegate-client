@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from conftest import FakeResponse, ScriptedSessionMixin
@@ -35,8 +36,8 @@ def services(count=3):
 
 
 def test_parse_expiry_formats():
-    assert parse_expiry("2026.10.28 09:30:05 PM") == datetime(2026, 10, 28, 21, 30, 5)
-    assert parse_expiry("2026.10.28 09:30:05") == datetime(2026, 10, 28, 9, 30, 5)
+    assert parse_expiry("2026.10.28 09:30:05 PM") == datetime(2026, 10, 28, 21, 30, 5, tzinfo=ZoneInfo("Asia/Kolkata"))
+    assert parse_expiry("2026.10.28 09:30:05") == datetime(2026, 10, 28, 9, 30, 5, tzinfo=ZoneInfo("Asia/Kolkata"))
     assert parse_expiry(None) is None
     assert parse_expiry("not a date") is None
 
@@ -44,7 +45,7 @@ def test_parse_expiry_formats():
 def test_parse_expiry_accepts_seconds():
     value = parse_expiry(600)
     assert value is not None
-    assert 590 < (value - datetime.now()).total_seconds() <= 600
+    assert 590 < (value - datetime.now(value.tzinfo)).total_seconds() <= 600
 
 
 def test_login_populates_session(settings, journal):
@@ -57,7 +58,7 @@ def test_login_populates_session(settings, journal):
     assert session.role_id == 3
     assert session.role_name == "Customs Broker"
     assert session.user_type == "organization"
-    assert session.expires_at == datetime(2099, 1, 1, 21, 30, 5)
+    assert session.expires_at == datetime(2099, 1, 1, 21, 30, 5, tzinfo=ZoneInfo("Asia/Kolkata"))
 
 
 def test_token_is_redacted_after_login(settings, journal):
@@ -166,3 +167,17 @@ def test_probe_409_is_expiry(settings, journal):
     probe = session.probe()
     assert not probe.ok
     assert probe.expired
+
+
+def test_portal_expiry_is_india_time_independent_of_host(settings, journal, monkeypatch):
+    import time
+    from zoneinfo import ZoneInfo
+    monkeypatch.setenv('TZ', 'UTC')
+    time.tzset()
+    try:
+        expiry = parse_expiry('2026.10.28 09:30:05 PM')
+        assert expiry.tzinfo == ZoneInfo('Asia/Kolkata')
+        assert expiry.astimezone(UTC).hour == 16
+    finally:
+        monkeypatch.delenv('TZ')
+        time.tzset()

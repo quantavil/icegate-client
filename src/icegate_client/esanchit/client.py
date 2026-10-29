@@ -17,7 +17,7 @@ from urllib.parse import urljoin, urlsplit
 
 from ..shared.errors import HandoffError, StagingError
 from ..shared.journal import Journal
-from ..shared.redact import query_keys
+from ..shared.redact import query_keys, remember
 from ..shared.session import IcegateSession
 from .page import HomePage
 
@@ -98,6 +98,7 @@ class EsanchitClient:
                     f"{len(seen)} hop(s)"
                 )
             page = HomePage.parse(response.text)
+            remember(page.tab_id)
             if "Upload Document Details" not in response.text:
                 raise HandoffError("eSANCHIT did not return the upload page")
             self.journal.add(
@@ -127,6 +128,7 @@ class EsanchitClient:
                 "may have idled out, run the handoff again"
             )
         page = HomePage.parse(response.text)
+        remember(page.tab_id)
         if "Upload Document Details" not in response.text:
             raise HandoffError("eSANCHIT home did not return the upload page")
         self.journal.add("esanchit_home", rows=len(page.rows), limits=page.describe_limits())
@@ -153,6 +155,7 @@ class EsanchitClient:
         response = self.post_form("uploadDocs", data=data, files=files)
 
         result = HomePage.parse(response.text)
+        remember(result.tab_id)
         self.journal.add(
             "stage_response",
             status=response.status_code,

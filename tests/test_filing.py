@@ -183,3 +183,14 @@ def test_batch_stops_after_uncertain_response(tmp_path, journal):
     assert len(receipts) == 1
     assert receipts[0].outcome is FilingOutcome.UNKNOWN
     assert not service.receipt_path(plan.files[1].sha256).exists()
+
+
+def test_duplicate_filing_requires_explicit_override(signed_sb, journal, tmp_path):
+    session = Session(Response(200, {'validationStatus': 'FAILED'}))
+    plan = FilingPlan.build([signed_sb])
+    service = FilingService(session, journal, tmp_path / 'state')
+    service.submit(plan, confirmation=plan.challenge)
+    with pytest.raises(DuplicateSubmit):
+        service.submit(plan, confirmation=plan.challenge)
+    service.submit(plan, confirmation=plan.challenge, allow_duplicate=True)
+    assert len(session.calls) == 2

@@ -182,6 +182,17 @@ def inspect_signatures(data: bytes) -> SignatureReport:
     )
 
 
+def _page_count(data: bytes) -> int:
+    # Page objects can be compressed in object streams and invisible to regex.
+    try:
+        from pyhanko.pdf_utils.reader import PdfFileReader
+        with _quiet_pyhanko():
+            reader = PdfFileReader(io.BytesIO(data))
+            return int(reader.root["/Pages"]["/Count"])
+    except Exception:  # noqa: BLE001 - retain compatibility with recoverable legacy PDFs
+        return len(_PAGE_RE.findall(data))
+
+
 def inspect_pdf(path: Path | str, *, contents: bytes | None = None) -> PdfInfo:
     target = Path(path)
     if not target.is_file():
@@ -202,7 +213,7 @@ def inspect_pdf(path: Path | str, *, contents: bytes | None = None) -> PdfInfo:
         path=target,
         size=len(data),
         sha256=hashlib.sha256(data).hexdigest(),
-        pages=len(_PAGE_RE.findall(data)),
+        pages=_page_count(data),
         encrypted=bool(_ENCRYPT_RE.search(data)),
         has_byte_range=bool(_BYTERANGE_RE.search(data)),
         signature_filters=filters,

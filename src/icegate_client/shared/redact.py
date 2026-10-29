@@ -72,7 +72,12 @@ def _opaque(match: re.Match[str]) -> str:
         return value
     # Keep filesystem paths and key=value fragments; they are not bearer
     # values and mangling them makes diagnostics unreadable.
-    if value.startswith(("/", "~", ".")):
+    before = match.string[:match.start()]
+    after = match.string[match.end():]
+    # Recognize complete filesystem paths and filenames, not arbitrary blobs.
+    if ("/" in value and (value.startswith("/") or before.endswith(("/", "~/", "./")))):
+        return value
+    if re.match(r"\.[A-Za-z0-9]{1,8}(?:\b|$)", after):
         return value
     if "=" in value.rstrip("="):
         return value

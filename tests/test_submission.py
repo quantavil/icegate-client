@@ -481,3 +481,48 @@ def test_stage_uploads_a_batch_in_one_request(session, journal, tmp_path):
     assert method == "POST" and url.endswith("/esanchit/uploadDocs")
     assert [name for name, _ in kwargs["files"]] == ["docs", "docs"]
     assert [part[1][0] for part in kwargs["files"]] == ["a.pdf", "b.pdf"]
+
+@pytest.mark.parametrize('body', ['   ', '<?xml version="1.0" encoding="UTF-8"?><html></html>'])
+def test_unusual_submit_response_is_unknown(service, session, signed_pdf, page, body):
+    plan = _plan([signed_pdf])
+    session._install([FakeResponse(200, text=staged_html()), FakeResponse(200, text=body)])
+    receipt = service.submit(plan, confirmation=plan.challenge, page=page)
+    assert receipt.outcome is SubmitOutcome.UNKNOWN
+    assert json.loads(service.receipt_path(plan.plan_id).read_text())['outcome'] == 'unknown'
+    assert len(session.calls) == 2
+
+
+def test_submit_interpret_exception_remains_unknown(service, session, signed_pdf, page, monkeypatch):
+    plan = _plan([signed_pdf])
+    session._install([FakeResponse(200, text=staged_html()), FakeResponse(200, text='ok')])
+    def fail(*args):
+        raise ValueError('private response content')
+    monkeypatch.setattr(service, '_interpret', fail)
+    receipt = service.submit(plan, confirmation=plan.challenge, page=page)
+    assert receipt.outcome is SubmitOutcome.UNKNOWN
+    assert 'private response content' not in receipt.detail
+    assert len(session.calls) == 2
+
+
+def test_unexpected_post_exception_leaves_unknown_receipt(service, session, signed_pdf, page, monkeypatch):
+    plan = _plan([signed_pdf])
+    session._install([FakeResponse(200, text=staged_html())])
+    original = service.client.post_form
+    def fail(action, **kwargs):
+        if action == 'submitDocs':
+            raise RuntimeError('secret response')
+        return original(action, **kwargs)
+    monkeypatch.setattr(service.client, 'post_form', fail)
+    result = service.submit(plan, confirmation=plan.challenge, page=page)
+    assert result.outcome is SubmitOutcome.UNKNOWN
+    assert 'secret response' not in result.detail
+    assert json.loads(service.receipt_path(plan.plan_id).read_text())['outcome'] == 'unknown'
+
+
+def test_pending_journal_event_is_not_a_result(service, session, signed_pdf, page, journal):
+    plan = _plan([signed_pdf])
+    session._install([FakeResponse(200, text=staged_html()), FakeResponse(500, text='unknown')])
+    service.submit(plan, confirmation=plan.challenge, page=page)
+    events = [json.loads(line)['event'] for line in journal.path.read_text().splitlines()]
+    assert events.count('submit_pending') == 1
+    assert events.count('submit_result') == 1

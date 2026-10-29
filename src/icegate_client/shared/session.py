@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -30,15 +31,15 @@ EXPIRY_FORMATS = ("%Y.%m.%d %I:%M:%S %p", "%Y.%m.%d %H:%M:%S", "%Y-%m-%d %H:%M:%
 
 
 def parse_expiry(value: Any) -> datetime | None:
-    """Parse ``tokenExpiresIn`` into a naive local datetime."""
+    """Interpret portal date strings as India time; numeric values are durations."""
     if value is None or value == "":
         return None
     if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(time.time() + float(value))
+        return datetime.now(ZoneInfo("Asia/Kolkata")) + timedelta(seconds=float(value))
     text = str(value).strip()
     for fmt in EXPIRY_FORMATS:
         try:
-            return datetime.strptime(text, fmt)
+            return datetime.strptime(text, fmt).replace(tzinfo=ZoneInfo("Asia/Kolkata"))
         except ValueError:
             continue
     return None
@@ -70,6 +71,7 @@ class ProbeResult:
 class IcegateSession:
     def __init__(self, settings: Settings, journal: Journal) -> None:
         self.settings = settings
+        remember(settings.password)
         self.journal = journal
         self.verify = build_ca_bundle(settings.state_dir)
         self.http = requests.Session()
@@ -124,7 +126,9 @@ class IcegateSession:
         last: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                return self._send(method, url, **kwargs)
+                response = self._send(method, url, **kwargs)
+                remember(*(cookie.value for cookie in self.http.cookies))
+                return response
             except requests.RequestException as exc:
                 last = exc
                 self.journal.add(
@@ -156,7 +160,7 @@ class IcegateSession:
     def seconds_left(self) -> float | None:
         if self.expires_at is None:
             return None
-        return (self.expires_at - datetime.now()).total_seconds()
+        return (self.expires_at - datetime.now(self.expires_at.tzinfo)).total_seconds()
 
     # ------------------------------------------------------------------ login
     def bootstrap(self) -> None:
@@ -233,14 +237,11 @@ class IcegateSession:
         )
         body = _json(response)
         count = None
-        if isinstance(body, list):
-            count = len(body)
-        elif isinstance(body, dict):
-            services = body.get("services")
-            if isinstance(services, list):
-                count = len(services)
-            elif isinstance(body.get("data"), list):
-                count = len(body["data"])
+        services = body.get("services")
+        if isinstance(services, list):
+            count = len(services)
+        elif isinstance(body.get("data"), list):
+            count = len(body["data"])
         result = ProbeResult(
             ok=response.status_code == 200 and bool(count),
             status=response.status_code,

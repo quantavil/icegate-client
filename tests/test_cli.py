@@ -105,4 +105,82 @@ def test_missing_pdf_reports_error_instead_of_traceback(monkeypatch, tmp_path, c
         "--state-dir", str(tmp_path / "state"),
     ])
     assert result == 1
-    assert "missing.pdf" in capsys.readouterr().out
+    assert "missing.pdf" in capsys.readouterr().err
+
+
+def test_json_warnings_go_to_stderr(unsigned_pdf, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv('ICEGATE_USERNAME', 'test')
+    monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
+    assert cli.main(['stage', str(unsigned_pdf), str(unsigned_pdf.parent / 'copy.pdf'),
+                     '--dry-run', '--allow-unsigned', '--json', '--state-dir', str(tmp_path / 'state')]) == 1
+    output = capsys.readouterr()
+    assert not output.out
+    assert 'error' in output.err
+
+
+def test_unmatched_document_map_is_rejected(unsigned_pdf, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv('ICEGATE_USERNAME', 'test')
+    monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
+    result = cli.main(['stage', str(unsigned_pdf), '--dry-run', '--allow-unsigned',
+                       '--doc-type', '331000', '--doc-type-map', 'typo.pdf=101000',
+                       '--state-dir', str(tmp_path / 'state')])
+    assert result == 1
+    assert 'typo.pdf' in (capsys.readouterr().err)
+
+
+def test_structured_json_scrubs_escaped_secret():
+    from icegate_client.shared.redact import remember
+    secret = 'a-secret"with\\escaped123'
+    remember(secret)
+    output = cli._json({'value': secret})
+    assert json.loads(output)['value'] == '<redacted>'
+
+
+def test_json_warning_does_not_contaminate_output(unsigned_pdf, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv('ICEGATE_USERNAME', 'test')
+    monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
+    other = tmp_path / 'copy.pdf'
+    other.write_bytes(unsigned_pdf.read_bytes())
+    assert cli.main(['stage', str(unsigned_pdf), str(other), '--dry-run', '--allow-unsigned',
+                     '--json', '--state-dir', str(tmp_path / 'state')]) == 0
+    result = capsys.readouterr()
+    assert json.loads(result.out)['ok']
+    assert 'identical' in result.err
+
+
+def test_stage_uploads_preflight_snapshot(unsigned_pdf, monkeypatch, tmp_path):
+    from conftest import EMPTY_HOME_HTML
+
+    from icegate_client.esanchit.page import HomePage
+    original = unsigned_pdf.read_bytes()
+    monkeypatch.setenv('ICEGATE_USERNAME', 'test')
+    monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
+    monkeypatch.setattr(cli.Context, 'authenticate', lambda self: None)
+    monkeypatch.setattr(cli.IcegateSession, 'refresh_if_expiring', lambda *args: False)
+    monkeypatch.setattr(cli.IcegateSession, 'esanchit_ticket', lambda *args: 'ticket')
+    monkeypatch.setattr(cli.EsanchitClient, 'open_from_ticket', lambda *args: HomePage.parse(EMPTY_HOME_HTML))
+    def stage(self, files, *, page, file_contents):
+        assert file_contents[files[0]] == original
+        return page
+    monkeypatch.setattr(cli.EsanchitClient, 'stage', stage)
+    real_preflight = cli._preflight_report
+    def change_after_validation(*args, **kwargs):
+        report = real_preflight(*args, **kwargs)
+        unsigned_pdf.write_bytes(b'replacement')
+        return report
+    monkeypatch.setattr(cli, '_preflight_report', change_after_validation)
+    assert cli.main(['stage', str(unsigned_pdf), '--allow-unsigned', '--state-dir', str(tmp_path / 'state')]) == 0
+
+
+def test_close_failure_does_not_leak_traceback(unsigned_pdf, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv('ICEGATE_USERNAME', 'test')
+    monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
+    def fail_close(self):
+        raise OSError('sensitive detail')
+    monkeypatch.setattr(cli.Context, 'close', fail_close)
+    assert cli.main(['stage', str(unsigned_pdf), '--allow-unsigned', '--dry-run', '--json',
+                     '--state-dir', str(tmp_path / 'state')]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)['ok']
+    assert 'sensitive detail' not in captured.err
+    assert 'journal' in captured.err

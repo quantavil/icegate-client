@@ -20,27 +20,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
 from filelock import FileLock, Timeout
-from requests.exceptions import RequestException
 
 from ..shared.errors import (
     DuplicateSubmit,
-    IcegateError,
     SubmitAborted,
     SubmitBusy,
     SubmitError,
 )
+from ..shared.files import write_private as _write_private
+from ..shared.files import write_receipt
 from ..shared.journal import Journal, now_iso
 from .client import EsanchitClient
 from .page import HomePage
-from .pdf import inspect_pdf
 
 # Only ``submission.py`` may reach this action.
 SUBMIT_ALLOWLIST = frozenset({"submitDocs"})
@@ -222,8 +219,11 @@ class SubmissionService:
         for item in plan.files:
             if len(item.contents) != item.size or hashlib.sha256(item.contents).hexdigest() != item.sha256:
                 raise SubmitAborted(f"{item.name}: planned contents no longer match the approved hash")
-            current = inspect_pdf(item.path)
-            if current.sha256 != item.sha256:
+            try:
+                current_hash = hashlib.sha256(item.path.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise SubmitAborted(f"{item.name}: could not re-read file") from exc
+            if current_hash != item.sha256:
                 raise SubmitAborted(
                     f"{item.name} changed after the plan was built; refusing to submit"
                 )
@@ -243,15 +243,12 @@ class SubmissionService:
         self._persist(self._receipt(
             plan, SubmitOutcome.UNKNOWN,
             detail="Submission may have been dispatched; reconcile with ICEGATE before retrying.",
-        ))
+        ), pending=True)
         try:
             response = self.client.post_form(
                 "submitDocs", data=fields, allowlist=SUBMIT_ALLOWLIST
             )
-        except (IcegateError, RequestException, OSError) as exc:
-            # The request may have reached the portal. Programming errors are
-            # not caught here on purpose: they must not be mistaken for an
-            # ambiguous submission.
+        except Exception as exc:  # noqa: BLE001 - dispatch may have reached the portal
             receipt = self._receipt(
                 plan,
                 SubmitOutcome.UNKNOWN,
@@ -263,7 +260,13 @@ class SubmissionService:
             self._persist(receipt)
             return receipt
 
-        receipt = self._interpret(plan, response)
+        try:
+            receipt = self._interpret(plan, response)
+        except Exception:  # noqa: BLE001 - response parsing failed after dispatch; do not retry
+            receipt = self._receipt(
+                plan, SubmitOutcome.UNKNOWN, status=getattr(response, "status_code", None),
+                detail="Could not interpret submit response; reconcile before retrying.",
+            )
         self._persist(receipt)
         return receipt
 
@@ -398,31 +401,6 @@ class SubmissionService:
             at=now_iso(),
         )
 
-    def _persist(self, receipt: Receipt) -> None:
-        path = self.receipt_path(receipt.plan_id)
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".receipt-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(receipt.as_dict(), indent=2) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-        self.journal.add("submit_result", **receipt.as_dict())
-
-
-def _write_private(path: Path, text: str) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(target, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    os.chmod(target, 0o600)
+    def _persist(self, receipt: Receipt, *, pending: bool = False) -> None:
+        write_receipt(self.receipt_path(receipt.plan_id), receipt.as_dict())
+        self.journal.add("submit_pending" if pending else "submit_result", **receipt.as_dict())

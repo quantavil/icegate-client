@@ -37,8 +37,9 @@ from .shared.config import (
     write_env_template,
 )
 from .shared.errors import ConfigError, IcegateError, PreflightError, StagingError
+from .shared.files import write_private as _write_private
 from .shared.journal import Journal
-from .shared.redact import scrub
+from .shared.redact import remember, scrub, scrub_obj
 from .shared.session import IcegateSession
 from .shared.tls import build_ca_bundle
 from .shared.tls import describe as describe_tls
@@ -57,8 +58,12 @@ def _table(headers: list[str], rows: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
-def _say(message: str = "") -> None:
-    print(scrub(message))
+def _say(message: str = "", *, error: bool = False) -> None:
+    print(scrub(message), file=sys.stderr if error else sys.stdout)
+
+
+def _json(value, **kwargs) -> str:
+    return json.dumps(scrub_obj(value), **kwargs)
 
 
 def _row_cells(row: StagedRow, plan: dict[str, tuple[str, str]] | None = None) -> list[str]:
@@ -139,6 +144,7 @@ class Context:
             env_file=args.env_file,
             state_dir=args.state_dir,
         )
+        remember(self.settings.password)
         self.journal = Journal(
             self.settings.journal_path(),
             enabled=not args.no_journal,
@@ -171,7 +177,7 @@ def cmd_login(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     probe = ctx.session.probe()
     if ctx.args.json:
         print(
-            json.dumps(
+            _json(
                 {
                     "ok": True,
                     "account": mask_identifier(ctx.settings.icegate_id),
@@ -207,7 +213,7 @@ def cmd_status(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     probe = ctx.session.probe()
     if ctx.args.json:
         print(
-            json.dumps(
+            _json(
                 {
                     "ok": probe.ok,
                     "services": probe.service_count,
@@ -233,7 +239,7 @@ def cmd_handoff(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     page = ctx.esanchit.open_from_ticket(ticket)
     if ctx.args.json:
         print(
-            json.dumps(
+            _json(
                 {
                     "ok": True,
                     "rows": [_row_summary(row) for row in page.rows],
@@ -259,7 +265,10 @@ def _doc_type_mapping(args: argparse.Namespace, files: list[Path], catalog: Docu
         if "=" not in pair:
             raise ConfigError(f"--doc-type-map expects FILE=CODE, got {pair!r}")
         name, code = pair.split("=", 1)
-        mapping[name.strip()] = code.strip()
+        name = name.strip()
+        if name not in {path.name for path in files}:
+            raise ConfigError(f"--doc-type-map file not found in input: {name}")
+        mapping[name] = code.strip()
     for name, code in mapping.items():
         if catalog.get(code) is None:
             raise ConfigError(f"unknown document code {code!r} for {name}")
@@ -282,9 +291,9 @@ def _preflight_report(
 
 def _enforce_report(report) -> None:
     for warning in report.warnings:
-        _say(f"warning: {warning}")
+        _say(f"warning: {warning}", error=True)
     for problem in report.problems:
-        _say(f"error: {problem}")
+        _say(f"error: {problem}", error=True)
     if not report.ok:
         raise PreflightError("preflight failed; nothing was sent")
 
@@ -311,7 +320,7 @@ def enforce_page_limits(page, report, *, strict: bool) -> None:
 
     messages = limit_messages(report.items, live)
     for severity, message in messages:
-        _say(f"{'error' if severity == 'problem' else 'warning'}: {message}")
+        _say(f"{'error' if severity == 'problem' else 'warning'}: {message}", error=True)
     if strict and any(severity == "problem" for severity, _ in messages):
         raise PreflightError("the live portal limits are tighter; nothing was sent")
 
@@ -321,7 +330,13 @@ def cmd_stage(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     catalog = DocumentCatalog.load()
     mapping = _doc_type_mapping(ctx.args, files, catalog)
 
-    report = _preflight_report(ctx, files)
+    snapshots = {}
+    for path in files:
+        try:
+            snapshots[path] = path.read_bytes()
+        except OSError as exc:
+            raise PreflightError(f"{path.name}: could not read file") from exc
+    report = _preflight_report(ctx, files, file_contents=snapshots)
     if not ctx.args.json:
         _say("preflight")
         _say(
@@ -332,7 +347,7 @@ def cmd_stage(ctx: Context, _args: argparse.Namespace | None = None) -> int:
                         item.path.name,
                         f"{item.size:,}",
                         str(item.pages),
-                        _signature_label(item),
+                        item.signature.describe(),
                         item.sha256[:12],
                     ]
                     for item in report.items
@@ -359,7 +374,7 @@ def cmd_stage(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     if ctx.args.dry_run:
         ctx.journal.add("stage_dry_run", **plan)
         if ctx.args.json:
-            print(json.dumps({"ok": True, "dry_run": True, **plan}, indent=2))
+            print(_json({"ok": True, "dry_run": True, **plan}, indent=2))
         else:
             _say("")
             _say("dry run: nothing was uploaded and nothing was submitted")
@@ -380,7 +395,7 @@ def cmd_stage(ctx: Context, _args: argparse.Namespace | None = None) -> int:
 
     ctx.journal.add("stage_intent", **plan, existing_rows=len(page.rows))
 
-    result = ctx.esanchit.stage(files, page=page)
+    result = ctx.esanchit.stage(files, page=page, file_contents=snapshots)
     rows = result.rows
     planned: dict[str, tuple[str, str]] = {}
     problems: list[str] = []
@@ -391,7 +406,7 @@ def cmd_stage(ctx: Context, _args: argparse.Namespace | None = None) -> int:
 
     if ctx.args.dump_html:
         _write_private(Path(ctx.args.dump_html).expanduser(), result.html)
-        _say(f"html saved to {ctx.args.dump_html} (mode 0600, contains a session tabId)")
+        _say(f"html saved to {ctx.args.dump_html} (mode 0600, contains a session tabId)", error=True)
 
     ctx.journal.add(
         "stage_result",
@@ -412,7 +427,7 @@ def cmd_stage(ctx: Context, _args: argparse.Namespace | None = None) -> int:
 
     if ctx.args.json:
         print(
-            json.dumps(
+            _json(
                 {
                     "ok": not problems,
                     "submitted": False,
@@ -493,7 +508,7 @@ def cmd_submit(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     if ctx.args.dry_run or not confirmed:
         if ctx.args.json:
             print(
-                json.dumps(
+                _json(
                     {
                         "submitted": False,
                         "confirmed": False,
@@ -549,7 +564,7 @@ def cmd_submit(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     receipt_file = ctx.submission.receipt_path(receipt.plan_id)
 
     if ctx.args.json:
-        print(json.dumps(receipt.as_dict(), indent=2))
+        print(_json(receipt.as_dict(), indent=2))
     else:
         _say("")
         _say(f"outcome     {receipt.outcome.value}")
@@ -600,13 +615,37 @@ def cmd_ecopy_search(ctx: Context, _args: argparse.Namespace | None = None) -> i
     else:
         rows = client.search_by_job(args.kind, args.location, args.job_number, args.job_date)
     if args.json:
-        print(scrub(json.dumps(rows, indent=2)))
+        print(_json(rows, indent=2))
     elif rows:
         keys = ["jobNumber", "jobDate", "docNumber", "docDate", "location"]
         _say(_table(["job", "job date", f"{args.kind} number", f"{args.kind} date", "location"],
                     [[str(row.get(key) or "") for key in keys] for row in rows]))
     else:
         _say("no records found")
+    return 0
+
+
+def cmd_ecopy_download(ctx: Context, _args: argparse.Namespace | None = None) -> int:
+    args = ctx.args
+    path = Path(args.output).expanduser()
+    if path.exists():
+        raise IcegateError(f"output file already exists: {path}")
+    ctx.authenticate()
+    client = ECopyClient(ctx.session)
+    if args.copy_type == "ack":
+        content = client.download_ack(args.filename)
+    else:
+        content = client.download_signed(args.irn, args.user_id)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "wb") as output:
+            output.write(content)
+    except FileExistsError as exc:
+        raise IcegateError(f"output file already exists: {path}") from exc
+    if args.json:
+        print(_json({"saved": str(path), "bytes": len(content), "type": args.copy_type}, indent=2))
+    else:
+        _say(f"saved {len(content)} bytes to {path}")
     return 0
 
 
@@ -624,7 +663,7 @@ def cmd_filing_upload(ctx: Context, _args: argparse.Namespace | None = None) -> 
             ],
         }
         if ctx.args.json:
-            print(json.dumps(data, indent=2))
+            print(_json(data, indent=2))
         else:
             _say("filing plan (signature structure checked; DSC not verified)")
             for item in plan.files:
@@ -635,9 +674,9 @@ def cmd_filing_upload(ctx: Context, _args: argparse.Namespace | None = None) -> 
 
     ctx.authenticate()
     service = FilingService(ctx.session, ctx.journal, ctx.settings.state_dir)
-    results = service.submit(plan, confirmation=ctx.args.confirm)
+    results = service.submit(plan, confirmation=ctx.args.confirm, allow_duplicate=ctx.args.allow_duplicate)
     if ctx.args.json:
-        print(json.dumps({"receipts": [item.as_dict() for item in results],
+        print(_json({"receipts": [item.as_dict() for item in results],
                           "not_attempted": len(plan.files) - len(results)}, indent=2))
     else:
         for item in results:
@@ -653,23 +692,13 @@ def cmd_filing_upload(ctx: Context, _args: argparse.Namespace | None = None) -> 
     return 0
 
 
-def _signature_label(item) -> str:
-    return item.signature.describe()
-
-
-def _write_private(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    os.chmod(path, 0o600)
 
 
 def cmd_doc_types(ctx: Context | None, args: argparse.Namespace) -> int:
     catalog = DocumentCatalog.load()
     results = catalog.search(args.term or "", limit=args.limit)
     if args.json:
-        print(json.dumps([asdict(item) for item in results], indent=2))
+        print(_json([asdict(item) for item in results], indent=2))
         return 0
     if not results:
         _say("no matching document codes")
@@ -712,7 +741,7 @@ def cmd_doctor(ctx: Context | None, args: argparse.Namespace) -> int:
 
     if args.json:
         print(
-            json.dumps(
+            _json(
                 [{"check": name, "ok": ok, "detail": detail} for name, ok, detail in checks],
                 indent=2,
             )
@@ -829,6 +858,7 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("files", nargs="+", help="already-signed .sb or .be files")
     upload.add_argument("--dry-run", action="store_true", help="inspect files without network access")
     upload.add_argument("--confirm", metavar="CHALLENGE", help="the exact challenge printed by the plan")
+    upload.add_argument("--allow-duplicate", action="store_true", help="repeat an attempted file only after reconciliation")
     upload.set_defaults(func=cmd_filing_upload)
 
     ecopy = sub.add_parser("ecopy", help="search Shipping Bill and Bill of Entry records")
@@ -844,8 +874,19 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--job-number", help="job number for a job search")
     search.add_argument("--job-date", type=_date_arg, help="job date, YYYY-MM-DD")
     search.set_defaults(func=cmd_ecopy_search)
+    download = ecopy_sub.add_parser("download", help="download an acknowledgement or signed copy")
+    download_sub = download.add_subparsers(dest="copy_type", required=True)
+    ack = download_sub.add_parser("ack", parents=[common], help="download an acknowledgement")
+    ack.add_argument("--filename", required=True, help="downloadUrl filename from an e-copy search")
+    ack.add_argument("--output", required=True, help="destination file; existing files are not overwritten")
+    ack.set_defaults(func=cmd_ecopy_download)
+    signed = download_sub.add_parser("signed", parents=[common], help="download a signed PDF")
+    signed.add_argument("--irn", required=True, help="IRN from an e-copy search")
+    signed.add_argument("--user-id", required=True, help="userId from the same search record")
+    signed.add_argument("--output", required=True, help="destination PDF; existing files are not overwritten")
+    signed.set_defaults(func=cmd_ecopy_download)
 
-    doctor = sub.add_parser("doctor", parents=[common], help="check configuration, TLS and tools")
+    doctor = sub.add_parser("doctor", parents=[common], help="check configuration and TLS")
     doctor.set_defaults(func=lambda ctx, args: cmd_doctor(None, args))
 
     init = sub.add_parser("init", help="write a mode-0600 env file template")
@@ -866,13 +907,19 @@ def main(argv: list[str] | None = None) -> int:
         code = args.func(ctx, args)
         return int(code or 0)
     except IcegateError as exc:
-        _say(f"error: {exc}")
+        _say(f"error: {exc}", error=True)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - avoid leaking request or response data in tracebacks
+        _say(f"error: unexpected {type(exc).__name__}; check receipts before retrying", error=True)
         return 1
     except KeyboardInterrupt:
         return 130
     finally:
         if ctx is not None:
-            ctx.close()
+            try:
+                ctx.close()
+            except Exception:  # noqa: BLE001 - do not mask a completed operation or leak data
+                _say("warning: could not close the run journal", error=True)
 
 
 if __name__ == "__main__":  # pragma: no cover

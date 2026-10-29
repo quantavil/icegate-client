@@ -89,6 +89,8 @@ uv run icegate ecopy search SB --from 2026-10-01 --to 2026-10-28
 uv run icegate ecopy search SB --yesterday
 uv run icegate ecopy search BE --today
 uv run icegate ecopy search BE --location INMBD6 --job-number 123 --job-date 2026-10-28 --json
+uv run icegate ecopy download ack --filename <downloadUrl> --output acknowledgement.ack
+uv run icegate ecopy download signed --irn <irn> --user-id <userId> --output signed-copy.pdf
 ```
 
 `ecopy search` retrieves Shipping Bill (`SB`) or Bill of Entry (`BE`) records
@@ -100,9 +102,14 @@ also accepted as an alias for `--yesterday`.
 Use either a relative-date flag, a `--from`/`--to` pair, or all three job
 fields; they cannot be combined. The JSON `downloadUrl` field is a portal
 filename, not necessarily a complete URL.
-The portal may restrict the permitted date range. Search reads records and does
-not download the document copies. On 2026-10-29, live searches by both date and
-job returned records for both SB and BE through this CLI.
+The portal may restrict the permitted date range. Search only lists records. To
+download, use `--json` to find the `downloadUrl`, `irn`, and `userId` fields
+for the desired row, then use the corresponding `ecopy download` command above.
+Use the `irn` and `userId` from the same row. The signed action downloads a PDF;
+the acknowledgement action downloads the portal’s `.ack` file. Files are mode
+0600 and existing destinations are never overwritten. On 2026-10-29, live
+SB and BE signed PDF downloads succeeded. The acknowledgement endpoint
+returned HTTP 409 for six sampled files; availability remains uncertain.
 
 `filing upload` accepts `.sb` and `.be` files containing signature and
 certificate sections. It checks the section structure only: it does not
@@ -113,7 +120,8 @@ automatic resubmission; an uncertain response must be reconciled manually.
 For a batch, processing stops at the first failed or unknown response and
 remaining files are not attempted. The challenge printed by the dry run must
 be copied exactly into the upload command. A local receipt prevents repeat
-uploads only within the same state directory.
+uploads only within the same state directory. After reconciling a previous attempt,
+`--allow-duplicate` permits an intentional repeat; it can create a duplicate filing.
 
 `submit` is two runs by design. The first prints the plan and a challenge; the
 second, with `--confirm`, authenticates, hands off, uploads, re-checks that the
@@ -138,6 +146,10 @@ Useful `stage` flags:
 | `--allow-unsigned` | do not fail on missing signature markers |
 | `--strict-limits` | treat portal size and count limits as errors |
 | `--dump-html PATH` | save the post-upload page (mode 0600) for debugging |
+
+Warnings and errors go to stderr; successful `--json` output goes to stdout.
+ICEGATE expiry date strings are interpreted as India time (the portal does not
+provide a timezone), independent of the computer’s timezone.
 
 Workflow commands accept `--json`, `--env-file`, `--state-dir`,
 `--no-journal` and `-v`.

@@ -61,12 +61,13 @@ hashes. Staging is ephemeral: the row lives in the current eSANCHIT
 | `src/icegate_client/esanchit/submission.py` | plan, challenge, lock, submit state machine, receipts |
 | `src/icegate_client/esanchit/pdf.py` | local preflight and pyHanko signature validation |
 | `src/icegate_client/shared/redact.py` | pattern and exact-value redaction |
+| `src/icegate_client/shared/files.py` | private diagnostic files and atomic receipt writes |
 | `src/icegate_client/shared/config.py` | env file and settings |
 | `src/icegate_client/shared/tls.py` | certifi plus the pinned eSANCHIT intermediate |
 | `src/icegate_client/cli.py` | commands and output |
 | `src/icegate_client/esanchit/data/document_codes.txt` | bundled eSANCHIT codes |
 | `src/icegate_client/filing/client.py` | signed SB/BE filing upload and per-file receipts |
-| `src/icegate_client/ecopy.py` | read-only Shipping Bill and Bill of Entry record searches |
+| `src/icegate_client/ecopy.py` | read-only Shipping Bill and Bill of Entry searches and downloads |
 | `tests/` | mocked tests, no network |
 
 ## Protocol facts (observed 2026-10-28)
@@ -79,8 +80,11 @@ filing module also returned HTTP 202 accepted for processing. An email arriving
 at the same time reported header validation failure for the same control
 number; it lacks an upload identifier, so attribution remains uncertain.
 The e-copy date and job searches were live-tested for both SB and BE using the
-dashboard search endpoints. Fetching a returned e-copy itself is not yet
-implemented. Date flags `--today` and `--yesterday` (also `--yestarday`)
+dashboard search endpoints. Signed PDFs for one SB and one BE were downloaded
+through the CLI using `/esanchit/getDocument` with the record’s `irn` and
+`userId`. The separate `/dashboard-utility/download-utility/downloadAckFile`
+endpoint returned HTTP 409 for six acknowledgement files; do not claim it
+works until a successful response is observed. Date flags `--today` and `--yesterday` (also `--yestarday`)
 use Asia/Kolkata calendar dates. A 27 October search returned four BE and 15
 SB records; the portal's BE page showed those four alongside the 28 October
 record when searched for 27–28 October. `downloadUrl` is a portal filename,
@@ -91,6 +95,7 @@ not necessarily a complete URL.
   bundle. It is obfuscation, not a secret.
 - Authenticated calls: `Authorization: <token>`, `session_id: <id>`,
   `channel: browser`.
+- Timezone-less expiry strings are interpreted as India time; the portal does not explicitly specify a timezone.
 - Token TTL is exactly 10 minutes. Refresh only works before expiry; after
   expiry the API returns HTTP 409 `auth error..!!!`.
 - Handoff: `POST /esanchit/esanchitDynamicUrl` returns a URL with a bearer
@@ -133,6 +138,9 @@ not necessarily a complete URL.
   `Entrust DV TLS Issuing RSA CA 2` in `certs/` fixes the chain.
 - Browser-free login worked without an OTP challenge in live tests. The user
   requested removal of OTP handling; stop with an error if login is rejected.
+
+Filing attempts can only be repeated with `--allow-duplicate` after reconciliation;
+the override can create a duplicate filing. The confirmation challenge remains required.
 
 ## Testing
 

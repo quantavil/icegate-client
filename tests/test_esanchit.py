@@ -262,3 +262,10 @@ def test_parse_page_without_request_cap_leaves_it_unset():
     page = HomePage.parse(staged_html())
     assert page.max_request_bytes is None
     assert "per request" not in page.describe_limits()
+
+
+def test_tab_id_is_registered_for_redaction(client, session):
+    from icegate_client.shared.redact import scrub
+    session._install([FakeResponse(200, text=EMPTY_HOME_HTML)])
+    client.open_from_ticket('https://www.icegate.gov.in/esanchit/home')
+    assert 'TAB0123456789' not in scrub('unexpected TAB0123456789')

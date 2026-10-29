@@ -75,3 +75,11 @@ def test_filesystem_paths_are_preserved():
 
 def scrub_obj_bytes():
     return Redactor().scrub_obj(b"hello")
+
+
+def test_preserves_receipt_path_and_long_filename():
+    from icegate_client.shared.redact import scrub
+    path = '/home/test/.local/state/icegate-client/receipts/123456789abc.json'
+    name = 'INVOICE_PACKING_LIST_CUSTOMER_REFERENCE_1234567890.pdf'
+    assert scrub(path) == path
+    assert scrub(name) == name

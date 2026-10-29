@@ -3,7 +3,7 @@
 The portal returns server-rendered JSP with legacy markup: a multipart form,
 a hidden ``tabId`` and a table whose cells hold read-only inputs and one
 ``<select>`` per staged row. Parsing lives here so the HTTP client in
-``esanchit.py`` only deals with requests and policy.
+``client.py`` only deals with requests and policy.
 
 Nothing in this module performs I/O and nothing logs: the page HTML carries a
 session-scoped ``tabId``.
@@ -35,7 +35,8 @@ def parse_html(text: str) -> etree._Element:
     pages are plain HTML and never need entities.
     """
     parser = lxml_html.HTMLParser(no_network=True, recover=True, huge_tree=False)
-    doc = lxml_html.fromstring(text or "<html></html>", parser=parser)
+    source = re.sub(r"^\s*<\?xml[^?]*\?>", "", text, count=1).strip()
+    doc = lxml_html.fromstring(source or "<html></html>", parser=parser)
     etree.strip_elements(doc, "script", "style", with_tail=False)
     return doc
 
