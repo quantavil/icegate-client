@@ -2,11 +2,47 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+import tempfile
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 from .shared.errors import IcegateError
 from .shared.session import IcegateSession
+
+
+class ECopyCache:
+    """Remember the portal user ID for each searched IRN, scoped to an account."""
+
+    def __init__(self, state_dir: Path, account: str) -> None:
+        account_hash = hashlib.sha256(account.casefold().encode()).hexdigest()
+        self.directory = state_dir / "ecopy" / account_hash
+
+    def _path(self, irn: str) -> Path:
+        return self.directory / hashlib.sha256(irn.encode()).hexdigest()
+
+    def remember(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            irn, user_id = row.get("irn"), row.get("userId")
+            if not isinstance(irn, str) or not irn.strip() or not isinstance(user_id, str) or not user_id.strip():
+                continue
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            fd, temporary = tempfile.mkstemp(dir=self.directory, prefix=".ecopy-")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as out:
+                    out.write(user_id)
+                os.replace(temporary, self._path(irn))
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+
+    def user_id(self, irn: str) -> str | None:
+        try:
+            return self._path(irn).read_text(encoding="utf-8").strip() or None
+        except FileNotFoundError:
+            return None
 
 
 class ECopyClient:

@@ -82,7 +82,9 @@ number; it lacks an upload identifier, so attribution remains uncertain.
 The e-copy date and job searches were live-tested for both SB and BE using the
 dashboard search endpoints. Signed PDFs for one SB and one BE were downloaded
 through the CLI using `/esanchit/getDocument` with the record’s `irn` and
-`userId`. The separate `/dashboard-utility/download-utility/downloadAckFile`
+`userId`. The record's `userId` differs from the configured ICEGATE login;
+searches cache the record's ID locally by account and IRN so downloads can
+reuse it. Never replace it with the login ID. The separate `/dashboard-utility/download-utility/downloadAckFile`
 endpoint returned HTTP 409 for six acknowledgement files; do not claim it
 works until a successful response is observed. Date flags `--today` and `--yesterday` (also `--yestarday`)
 use Asia/Kolkata calendar dates. A 27 October search returned four BE and 15

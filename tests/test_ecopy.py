@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from icegate_client import cli
-from icegate_client.ecopy import ECopyClient
+from icegate_client.ecopy import ECopyCache, ECopyClient
 from icegate_client.shared.errors import IcegateError
 
 
@@ -114,6 +114,28 @@ def test_download_signed_uses_portal_irn_and_user_id():
     _, url, kwargs = session.calls[0]
     assert url.endswith('/esanchit/getDocument')
     assert kwargs['json_body'] == {'irn': '1234567890123456', 'userId': 'USER'}
+
+
+def test_search_remembers_user_id_for_later_download(tmp_path, monkeypatch):
+    monkeypatch.setenv('ICEGATE_USERNAME', 'test')
+    monkeypatch.setenv('ICEGATE_PASSWORD', 'test')
+    monkeypatch.setattr(cli.Context, 'authenticate', lambda self: None)
+    monkeypatch.setattr(ECopyClient, 'search_by_date', lambda *a: [{'irn': '123', 'userId': 'PORTAL-USER'}])
+    monkeypatch.setattr(ECopyClient, 'download_signed', lambda self, irn, user_id:
+                        b'%PDF-1.7' if (irn, user_id) == ('123', 'PORTAL-USER') else b'wrong')
+    state = str(tmp_path / 'state')
+    assert cli.main(['ecopy', 'sb', '--today', '--state-dir', state]) == 0
+    output = tmp_path / 'result.pdf'
+    assert cli.main(['ecopy', 'download', '--irn', '123', '-o', str(output), '--state-dir', state]) == 0
+    assert output.read_bytes() == b'%PDF-1.7'
+
+
+def test_search_cache_is_scoped_to_account(tmp_path):
+    first = ECopyCache(tmp_path, 'FIRST')
+    first.remember([{'irn': '123', 'userId': 'PORTAL-USER'}])
+    assert first.user_id('123') == 'PORTAL-USER'
+    assert ECopyCache(tmp_path, 'SECOND').user_id('123') is None
+    assert first.user_id('missing') is None
 
 
 def test_download_rejects_errors_and_non_pdf_signed_response():

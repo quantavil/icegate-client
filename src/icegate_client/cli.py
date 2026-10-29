@@ -1,8 +1,7 @@
 """Command line interface.
 
-Every command logs in fresh. Nothing is cached to disk: the dashboard token
-and the eSANCHIT session cookie are short-lived bearer values and are kept in
-memory only.
+Every command logs in fresh. Dashboard tokens and eSANCHIT session cookies
+are short-lived bearer values and are kept in memory only.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import __version__
-from .ecopy import ECopyClient
+from .ecopy import ECopyCache, ECopyClient
 from .esanchit.client import EsanchitClient
 from .esanchit.doc_types import DocumentCatalog
 from .esanchit.page import StagedRow, split_option
@@ -614,6 +613,7 @@ def cmd_ecopy_search(ctx: Context, _args: argparse.Namespace | None = None) -> i
         rows = client.search_by_date(args.kind, args.start_date, args.end_date)
     else:
         rows = client.search_by_job(args.kind, args.location, args.job_number, args.job_date)
+    ECopyCache(ctx.settings.state_dir, ctx.settings.icegate_id).remember(rows)
     if args.json:
         print(_json(rows, indent=2))
     elif rows:
@@ -630,8 +630,12 @@ def cmd_ecopy_download(ctx: Context, _args: argparse.Namespace | None = None) ->
     if args.copy_type == "ack":
         if not args.filename or args.irn or args.user_id:
             raise IcegateError("ack requires --filename, without --irn or --user-id")
-    elif not args.irn or not args.user_id or args.filename:
-        raise IcegateError("signed download requires --irn and --user-id, without --filename")
+    elif not args.irn or args.filename:
+        raise IcegateError("signed download requires --irn, without --filename")
+    if args.copy_type == "signed" and not args.user_id:
+        args.user_id = ECopyCache(ctx.settings.state_dir, ctx.settings.icegate_id).user_id(args.irn)
+        if not args.user_id:
+            raise IcegateError("IRN not found in saved search results; run an ecopy search for it first")
     path = Path(args.output).expanduser()
     if path.exists():
         raise IcegateError(f"output file already exists: {path}")
@@ -891,7 +895,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("copy_type", nargs="?", choices=["signed", "ack"], default="signed")
     download.add_argument("--filename", help="downloadUrl filename for an acknowledgement")
     download.add_argument("--irn", help="IRN from an e-copy search")
-    download.add_argument("--user-id", help="userId from the same search record")
+    download.add_argument("--user-id", help="optional portal userId override; normally taken from search results")
     download.add_argument("-o", "--output", required=True, help="destination; existing files are not overwritten")
     download.set_defaults(func=cmd_ecopy_download)
 

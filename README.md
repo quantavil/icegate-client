@@ -93,7 +93,7 @@ icegate ecopy sb --yesterday
 icegate ecopy be --today
 icegate ecopy search BE --location INMBD6 --job-number 123 --job-date 2026-10-28 --json
 icegate ecopy download ack --filename <downloadUrl> --output acknowledgement.ack
-icegate ecopy download --irn <irn> --user-id <userId> -o signed-copy.pdf
+icegate ecopy download --irn <irn> -o signed-copy.pdf
 ```
 
 `ecopy sb`, `ecopy be`, and `ecopy search` retrieve Shipping Bill (`SB`) or Bill of Entry (`BE`) records
@@ -106,9 +106,12 @@ Use either a relative-date flag, a `--from`/`--to` pair, or all three job
 fields; they cannot be combined. The JSON `downloadUrl` field is a portal
 filename, not necessarily a complete URL.
 The portal may restrict the permitted date range. Search only lists records. To
-download, use `--json` to find the `downloadUrl`, `irn`, and `userId` fields
-for the desired row, then use the corresponding `ecopy download` command above.
-Use the `irn` and `userId` from the same row. The signed action downloads a PDF;
+download, use `--json` to find the `downloadUrl` or `irn` for the desired row.
+The client remembers each search result's portal user ID in the local state
+directory, scoped to your account, and uses it automatically for signed PDF
+downloads. Search for the record first; if you have not searched for it, the
+command will ask you to do so. `--user-id` is available as an explicit override.
+The saved identifiers are not login credentials or session tokens. The signed action downloads a PDF;
 the acknowledgement action downloads the portal’s `.ack` file. On Linux and macOS files are mode 0600; on Windows they inherit folder ACLs, which you must restrict. Existing destinations are never overwritten. On 2026-10-29, live
 SB and BE signed PDF downloads succeeded. The acknowledgement endpoint
 returned HTTP 409 for six sampled files; availability remains uncertain.

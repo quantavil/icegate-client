@@ -173,11 +173,13 @@ def test_portal_expiry_is_india_time_independent_of_host(settings, journal, monk
     import time
     from zoneinfo import ZoneInfo
     monkeypatch.setenv('TZ', 'UTC')
-    time.tzset()
+    if hasattr(time, 'tzset'):
+        time.tzset()
     try:
         expiry = parse_expiry('2026.10.28 09:30:05 PM')
         assert expiry.tzinfo == ZoneInfo('Asia/Kolkata')
         assert expiry.astimezone(UTC).hour == 16
     finally:
         monkeypatch.delenv('TZ')
-        time.tzset()
+        if hasattr(time, 'tzset'):
+            time.tzset()
