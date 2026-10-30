@@ -43,7 +43,10 @@ _CHALLENGE = re.compile(r"^challenge\s+((?:SUBMIT|FILE) \d+ ([0-9a-f]{12}))\s*$"
 _RECEIPT = re.compile(r"^receipt\s+(\S.*?)\s*$", re.M)
 _SB_RECORD = re.compile(r"<TABLE>SB\r?\n\s*F\x1d([A-Za-z0-9]{4,10})\x1d")  # F, location, job number, date
 _BAD_PDF = re.compile(r"(\S+) is not a valid PDF file")
+_PDF_END = re.compile(rb"startxref\s+\d+\s+%%EOF")  # a real end of file, not a stray %%EOF in glued-on junk
 FLATTEN_DPI = 120  # 150 dpi pushes a 14-page invoice past the portal's 2 MiB per-file cap once signed
+PORTAL_FILE_CAP = 2 * 1024 * 1024
+SIGN_OVERHEAD_PER_PAGE = 13_000  # observed: 4 pages, 4 signatures added about 48 kB
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
 
@@ -363,6 +366,55 @@ def flatten_pdf(source: Path, target: Path) -> None:
         flat.save(target, garbage=4, deflate=True)
 
 
+def keep_original(path: Path) -> Path:
+    """Copy a file into FOLDER/.original/ before it is changed; an earlier, different copy of the same
+    name (a previous run's file) is never overwritten."""
+    backup = path.parent / ".original"
+    backup.mkdir(exist_ok=True)
+    data, kept, n = path.read_bytes(), backup / path.name, 1
+    while kept.exists() and kept.read_bytes() != data:
+        kept, n = backup / f"{path.stem}.{n}{path.suffix}", n + 1
+    if not kept.exists():
+        shutil.copy2(path, kept)
+    return kept
+
+
+def prepare_pdf(path: Path, say: Callable[[str], None]) -> None:
+    """Before signing, on every PDF: it must open in PyMuPDF; cut bytes after the last startxref/%%EOF
+    (a portal download came with an HTML page glued on), a plain cut so existing signatures stay
+    intact; recompress and, if need be, flatten if signing would push it past the per-file cap.
+    The untouched original goes to FOLDER/.original/ first."""
+    data = path.read_bytes()
+    ends = [m.end() for m in _PDF_END.finditer(data)]
+    clean = data[:ends[-1]] + b"\n" if ends and data[ends[-1]:].strip() else data
+    import pymupdf
+    try:
+        doc = pymupdf.open(stream=clean, filetype="pdf")
+    except Exception as exc:
+        raise Stop(f"{path.name} cannot be read as a PDF ({exc}); nothing was signed") from None
+    with doc:
+        pages = len(doc)
+        fits = lambda size: size + SIGN_OVERHEAD_PER_PAGE * pages <= PORTAL_FILE_CAP  # noqa: E731
+        if clean is data and fits(len(data)):
+            return
+        kept = keep_original(path)
+        fixed = path.with_name(f".{path.name}.fixing")
+        try:
+            note = "trailing bytes removed"
+            fixed.write_bytes(clean)
+            if not fits(len(clean)):
+                doc.save(fixed, garbage=4, deflate=True)
+                note = "recompressed"
+                if not fits(fixed.stat().st_size):
+                    flatten_pdf(path, fixed)
+                    note = ("flattened to images to stay under the portal's 2 MiB cap once signed" if fits(fixed.stat().st_size)
+                            else "flattened to images, but it may still pass the portal's 2 MiB cap once signed")
+            fixed.replace(path)
+        finally:
+            fixed.unlink(missing_ok=True)
+    say(f"fixed {path.name}: {note} (original kept as {kept})")
+
+
 # ---------------------------------------------------------------- draft text
 def portal_date(value: object) -> str:
     """Portal timestamps are midnight UTC, or 18:30 UTC for IST midnight; some records already hold DD-MM-YYYY."""
@@ -493,6 +545,9 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
                 + (": " + ", ".join(p.name for p in todo) if len(todo) <= 5 else "")
                 + ("" if dry_run else "; no signer available, sign them first"))
         else:
+            for path in todo:
+                if path.suffix.lower() == ".pdf":
+                    prepare_pdf(path, say)
             sign_folder(folder, signer, say)
             tidy_names(folder, say)
     pdfs, filings = scan(folder, ledger, say)
@@ -574,11 +629,8 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
                           "(nothing was submitted). Flatten the pages to images, sign again and retry once?"):
             raise bad
         backup = folder / ".original"
-        backup.mkdir(exist_ok=True)
         for item in broken:
-            kept = backup / item.original.name
-            shutil.copy2(item.original, kept)
-            flatten_pdf(kept, item.original)
+            flatten_pdf(keep_original(item.original), item.original)
             item.signed.unlink()
         sign_folder(folder, signer, say)
         tidy_names(folder, say)

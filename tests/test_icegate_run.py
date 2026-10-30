@@ -27,6 +27,7 @@ SB_FILE = "HREC\x1dZZ\x1dINMBD6\r\n<TABLE>SB\r\nF\x1dinmbd6\x1d893\x1d20261030\x
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "STATE", tmp_path / "state")
     monkeypatch.setattr(mod, "copy_html", lambda text: True)
+    monkeypatch.setattr(mod, "prepare_pdf", lambda path, say: None)  # the fixtures are not real PDFs
 
 
 class FakeRun:
@@ -406,3 +407,65 @@ def test_sb_without_a_readable_location_stops_before_anything_is_sent(tmp_path):
 def test_portal_date_keeps_a_ready_made_date():
     assert mod.portal_date("30-10-2026") == "30-10-2026"
     assert mod.portal_date("2026-10-27T18:30:00.000Z") == "28-10-2026"
+
+
+def real_pdf(pages=1) -> bytes:
+    import pymupdf
+    with pymupdf.open() as doc:
+        for n in range(pages):
+            doc.new_page().insert_text((72, 72), f"page {n}")
+        return doc.tobytes()
+
+
+def test_prepare_pdf_strips_bytes_after_eof_and_keeps_the_original(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    path = tmp_path / "a.pdf"
+    pdf = real_pdf()
+    path.write_bytes(pdf + b"<html>junk %%EOF</html>\r\n")
+    said = []
+    mod.prepare_pdf(path, said.append)
+    # a plain cut, not a rewrite: an existing signature's byte range stays intact
+    assert path.read_bytes().rstrip() == pdf.rstrip() and said and "trailing" in said[0]
+    assert (tmp_path / ".original" / "a.pdf").read_bytes().endswith(b"</html>\r\n")
+    assert not list(tmp_path.glob(".*.fixing"))
+
+
+def test_prepare_pdf_never_overwrites_or_flattens_an_older_backup(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(mod, "SIGN_OVERHEAD_PER_PAGE", mod.PORTAL_FILE_CAP)
+    (tmp_path / ".original").mkdir()
+    (tmp_path / ".original" / "a.pdf").write_bytes(stale := real_pdf(1))
+    path = tmp_path / "a.pdf"
+    path.write_bytes(new := real_pdf(3))
+    mod.prepare_pdf(path, lambda _: None)
+    import pymupdf
+    with pymupdf.open(path) as doc:
+        assert len(doc) == 3  # flattened from this file, not from the stale backup
+    assert (tmp_path / ".original" / "a.pdf").read_bytes() == stale
+    assert (tmp_path / ".original" / "a.1.pdf").read_bytes() == new
+
+
+def test_prepare_pdf_leaves_a_clean_small_file_alone(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    path = tmp_path / "a.pdf"
+    path.write_bytes(data := real_pdf())
+    mod.prepare_pdf(path, lambda _: pytest.fail("should not touch it"))
+    assert path.read_bytes() == data and not (tmp_path / ".original").exists()
+
+
+def test_prepare_pdf_refuses_a_non_pdf(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    path = tmp_path / "a.pdf"
+    path.write_bytes(b"not a pdf")
+    with pytest.raises(mod.Stop, match="cannot be read"):
+        mod.prepare_pdf(path, lambda _: None)
+
+
+def test_prepare_pdf_flattens_when_signing_would_pass_the_cap(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(mod, "SIGN_OVERHEAD_PER_PAGE", mod.PORTAL_FILE_CAP)
+    path = tmp_path / "a.pdf"
+    path.write_bytes(real_pdf(2))
+    said = []
+    mod.prepare_pdf(path, said.append)
+    assert "flattened" in said[0] and (tmp_path / ".original" / "a.pdf").exists()
