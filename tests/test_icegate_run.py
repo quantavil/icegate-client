@@ -353,41 +353,6 @@ def test_dry_run_reports_a_rename_but_changes_nothing(tmp_path):
     assert sorted(p.name for p in folder.iterdir()) == ["INV & PACK.pdf", "INV_&_PACK_Signed.pdf"]
 
 
-def test_refused_pdf_is_flattened_signed_again_and_retried_once(tmp_path, monkeypatch):
-    folder = make(tmp_path, "Commercial Invoice 1.pdf", signed=False)
-    flattened = []
-    monkeypatch.setattr(mod, "flatten_pdf", lambda src, dst: (flattened.append(src.name), dst.write_text("flat")))
-    run, ui = FakeRun(tmp_path), FakeUI()
-    refused = []
-    inner = run.__call__
-
-    def refusing(argv):
-        out = inner(argv)
-        if "--confirm" in argv and argv[:2] == ["esanchit", "submit"] and not refused:
-            refused.append(1)
-            return SimpleNamespace(returncode=1, stdout="",
-                                   stderr="error: docs_error: Please upload PDF files only, Commercial_Invoice_1_Signed.pdf is not a valid PDF file.\n")
-        return out
-    assert go(folder, tmp_path, refusing, ui=ui, signer=fake_signer(tmp_path)) == 0
-    assert flattened == ["Commercial Invoice 1.pdf"] and len(ui.confirms) == 3     # upload, flatten, upload again
-    done = next((folder / "Done").iterdir())
-    assert (done / "Commercial_Invoice_1_Signed.pdf").read_text() == "flat"        # signed from the flat copy
-    assert (folder / ".original" / "Commercial Invoice 1.pdf").read_text() == "Commercial Invoice 1.pdf"
-
-
-def test_refused_pdf_stays_refused_without_a_second_yes(tmp_path, monkeypatch):
-    folder = make(tmp_path, "Commercial Invoice 1.pdf", signed=False)
-    monkeypatch.setattr(mod, "flatten_pdf", lambda src, dst: dst.write_text("flat"))
-    ui, answers = FakeUI(), iter([True, False])
-    ui.confirm = lambda text: next(answers)
-    run = FakeRun(tmp_path)
-    with pytest.raises(mod.Stop, match="Already submitted in this run: nothing"):
-        go(folder, tmp_path, lambda a: SimpleNamespace(
-            returncode=1, stdout="", stderr="X_Signed.pdf is not a valid PDF file") if "--confirm" in a else run(a),
-           ui=ui, signer=fake_signer(tmp_path))
-    assert len([c for c in run.calls if "--confirm" in c]) == 0
-
-
 def test_sb_files_must_name_one_location(tmp_path):
     folder = make(tmp_path, "893.sb", "894.sb")
     (folder / "894_Signed.sb").write_text(SB_FILE.replace("inmbd6", "INDEL4"), newline="")

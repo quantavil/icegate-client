@@ -42,7 +42,6 @@ FILING_SUFFIXES = {".sb", ".be"}
 _CHALLENGE = re.compile(r"^challenge\s+((?:SUBMIT|FILE) \d+ ([0-9a-f]{12}))\s*$", re.M)
 _RECEIPT = re.compile(r"^receipt\s+(\S.*?)\s*$", re.M)
 _SB_RECORD = re.compile(r"<TABLE>SB\r?\n\s*F\x1d([A-Za-z0-9]{4,10})\x1d")  # F, location, job number, date
-_BAD_PDF = re.compile(r"(\S+) is not a valid PDF file")
 FLATTEN_DPI = 120  # 150 dpi pushes a 14-page invoice past the portal's 2 MiB per-file cap once signed
 FLAT_MARK = "icegate-run flattened"  # a flattened file is not flattened again
 PORTAL_FILE_CAP = 2 * 1024 * 1024
@@ -57,14 +56,6 @@ class Stop(Exception):
 
 class NotYet(Stop):
     """The portal has not registered the SB number yet."""
-
-
-class BadPdf(Stop):
-    """The portal refused a signed PDF as invalid; nothing was submitted."""
-
-    def __init__(self, message: str, names: list[str]) -> None:
-        super().__init__(message)
-        self.names = names
 
 
 POLL_SECONDS = 30  # each check is a fresh client login, so do not hammer the portal
@@ -336,9 +327,6 @@ def send_upload(run: Runner, upload: Upload, say: Callable[[str], None]) -> None
     if done.returncode in (2, 3):
         raise Stop(f"{upload.group} outcome is unknown (exit {done.returncode}); do NOT re-run. "
                    f"Check the portal and mail. Plan id {upload.plan_id}")
-    if done.returncode == 1 and (names := _BAD_PDF.findall(done.stdout + done.stderr)):
-        raise BadPdf(f"{upload.group} upload refused: the portal calls {', '.join(names)} an invalid PDF; "
-                     f"nothing was submitted. Plan id {upload.plan_id}", names)
     if done.returncode:
         raise Stop(f"{upload.group} upload stopped (exit {done.returncode}); read the message above "
                    f"before trying again. Plan id {upload.plan_id}")
@@ -610,26 +598,6 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
         except OSError as exc:
             say(f"warning: uploaded, but could not archive some files ({exc.strerror}); they are still in the folder")
 
-    def reflatten(upload: Upload, bad: BadPdf) -> Upload:
-        """One flattened retry for PDFs the portal refused; a fresh plan and a fresh yes, never automatic."""
-        broken = [i for i in upload.items if i.signed.name in bad.names and i.original is not None]
-        if not broken or ui is None or signer is None:
-            raise bad
-        if not ui.confirm(f"The portal refused {', '.join(i.signed.name for i in broken)} as an invalid PDF "
-                          "(nothing was submitted). Flatten the pages to images, sign again and retry once?"):
-            raise bad
-        backup = folder / ".original"
-        for item in broken:
-            flatten_pdf(keep_original(item.original), item.original)
-            item.signed.unlink()
-        sign_folder(folder, signer, say)
-        tidy_names(folder, say)
-        again = plan_upload(run, upload.group, upload.prefix, upload.items)
-        say(f"\n== {again.group} plan (flattened) ==\n{again.plan}\nunflattened originals are in {backup}")
-        if not ui.confirm(f"Upload {len(again.items)} signed file(s) now? This cannot be undone."):
-            raise Stop("not confirmed; nothing was uploaded")
-        return again
-
     def draft(name: str, build: Callable[..., str], *args: object) -> None:
         try:
             text = build(*args)
@@ -651,15 +619,10 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
 
     try:
         for upload in uploads:
-            sent = upload
-            try:
-                send_upload(run, sent, say)
-            except BadPdf as bad:
-                sent = reflatten(upload, bad)
-                send_upload(run, sent, say)
-            finish(sent)
-            if sent.group == "eSANCHIT":
-                draft("esanchit", esanchit_draft, sent.receipt or STATE / "receipts" / f"{sent.plan_id}.json", known)
+            send_upload(run, upload, say)
+            finish(upload)
+            if upload.group == "eSANCHIT":
+                draft("esanchit", esanchit_draft, upload.receipt or STATE / "receipts" / f"{upload.plan_id}.json", known)
             else:
                 jobs = [m.group(0) for i in sbs if (m := re.match(r"\d+", i.signed.stem))]
                 if jobs:

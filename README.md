@@ -181,10 +181,12 @@ A personal workflow around the client, not part of it. Both scripts are plain Py
 system-neutral. The token driver is not: the signing library currently supports Linux only
 (vendor `libcastle_v2.so`), so signing elsewhere waits on that support. `--no-sign` lets
 the upload half run anywhere on files signed elsewhere. The script declares its one
-dependencies (`questionary` for the prompts, `rich` for the tables and spinner, `pymupdf` for the flatten retry) in a header, so `uv` installs it on first run; the client's
+dependencies (`questionary` for the prompts, `rich` for the tables and spinner, `pymupdf` to flatten PDFs) in a header, so `uv` installs it on first run; the client's
 own dependencies are unchanged. It does this, in order:
 
-1. **Sign.** Unsigned `.pdf`, `.sb` and `.be` files are signed by running
+1. **Sign.** Each unsigned PDF is first flattened to page images (PyMuPDF, 120 dpi
+   grayscale; old signatures become part of the image, the original goes to
+   `FOLDER/.original/`, text is no longer selectable). Unsigned `.pdf`, `.sb` and `.be` files are then signed by running
    `scripts/sign-all.py FOLDER` as a separate program (`--no-sign` skips this). The
    signer alone handles the token and PIN; the script never sees them.
 2. **Pick files.** A checklist of the signed files (all ticked). Names already uploaded
@@ -201,10 +203,6 @@ own dependencies are unchanged. It does this, in order:
    codes) and asks once; `--yes` skips the question and is needed when not on a
    terminal. It then passes the plan's challenge to the client's `--confirm`. An
    unknown outcome stops the run with "do not re-run".
-   If the portal refuses a PDF as "not a valid PDF file" (it submitted nothing), the
-   script offers one retry: it flattens the pages to images (PyMuPDF, 120 dpi grayscale),
-   signs the flat copy, shows a new plan and asks again. The unflattened original is kept
-   in `FOLDER/.original/`. Flattening loses selectable text, so it is never done unasked.
 5. **Draft and archive.** It writes the reply as HTML tables (eSANCHIT from the
    receipt, SB from an e-copy search of the last seven days by job number; the number can take a couple of minutes to appear,
    so it re-checks every 30 s for up to `--wait` seconds, default 240, and Ctrl-C skips it), copies it
