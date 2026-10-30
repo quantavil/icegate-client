@@ -100,7 +100,7 @@ icegate my-iec --json                             # all IEC clients
 icegate enquiry sb --location INMBD6 --sb-no 6817710 --sb-date 2026-09-14 --json   # public, no login
 ```
 
-`ecopy sb`, `ecopy be`, and `ecopy search` retrieve Shipping Bill (`SB`) or Bill of Entry (`BE`) records
+`ecopy sb`, `ecopy be`, `ecopy gatepass`, and `ecopy search` retrieve Shipping Bill (`SB`), Bill of Entry (`BE`) or Shipping Bill gatepass (`GATEPASS`) records
 by date range, or by customs location, job number and job date. Dates use
 `YYYY-MM-DD`. Add `--json` for the complete portal records, including fields
 for available copies; the table shows job, document and location details.
@@ -118,7 +118,14 @@ command will ask you to do so. `--user-id` is available as an explicit override.
 The saved identifiers are not login credentials or session tokens. The signed action downloads a PDF;
 the acknowledgement action downloads the portal’s `.ack` file. On Linux and macOS files are mode 0600; on Windows they inherit folder ACLs, which you must restrict. Existing destinations are never overwritten. On 2026-10-29, live
 SB and BE signed PDF downloads succeeded. The acknowledgement endpoint
-returned HTTP 409 for six sampled files; availability remains uncertain.
+returned HTTP 409 for six sampled files; availability remains uncertain. A signed
+download answering 409 means the portal is still retrieving an older document;
+retry in about an hour. Gatepass records without an `irn` have no gatepass yet.
+
+`report job-status` prints the portal's latest ~200 Shipping Bills (no date
+filter), `my-iec` lists your IEC clients, and `enquiry sb` reads the public
+Shipping Bill enquiry for one bill without logging in. All three are read-only
+and accept `--json`.
 
 `filing upload` accepts `.sb` and `.be` files containing signature and
 certificate sections. It checks the section structure only: it does not

@@ -67,10 +67,11 @@ hashes. Staging is ephemeral: the row lives in the current eSANCHIT
 | `src/icegate_client/cli.py` | commands and output |
 | `src/icegate_client/esanchit/data/document_codes.txt` | bundled eSANCHIT codes |
 | `src/icegate_client/filing/client.py` | signed SB/BE filing upload and per-file receipts |
-| `src/icegate_client/ecopy.py` | read-only Shipping Bill and Bill of Entry searches and downloads |
+| `src/icegate_client/ecopy.py` | read-only Shipping Bill, Bill of Entry and gatepass searches and downloads |
 | `src/icegate_client/jobstatus.py` | read-only Shipping Bill Job Status detailed report |
 | `src/icegate_client/myiec.py` | read-only My IEC client list |
 | `src/icegate_client/enquiry.py` | public Shipping Bill enquiry, no login |
+| `scripts/sign-and-plan.sh` | wrapper: copies named files to a temp dir, runs the private signer, writes `_Signed` files, then runs a `--dry-run` plan; never uploads |
 | `tests/` | mocked tests, no network |
 
 ## Protocol facts (observed 2026-10-28)
