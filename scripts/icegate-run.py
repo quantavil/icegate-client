@@ -43,8 +43,8 @@ _CHALLENGE = re.compile(r"^challenge\s+((?:SUBMIT|FILE) \d+ ([0-9a-f]{12}))\s*$"
 _RECEIPT = re.compile(r"^receipt\s+(\S.*?)\s*$", re.M)
 _SB_RECORD = re.compile(r"<TABLE>SB\r?\n\s*F\x1d([A-Za-z0-9]{4,10})\x1d")  # F, location, job number, date
 _BAD_PDF = re.compile(r"(\S+) is not a valid PDF file")
-_PDF_END = re.compile(rb"startxref\s+\d+\s+%%EOF")  # a real end of file, not a stray %%EOF in glued-on junk
 FLATTEN_DPI = 120  # 150 dpi pushes a 14-page invoice past the portal's 2 MiB per-file cap once signed
+FLAT_MARK = "icegate-run flattened"  # a flattened file is not flattened again
 PORTAL_FILE_CAP = 2 * 1024 * 1024
 SIGN_OVERHEAD_PER_PAGE = 13_000  # observed: 4 pages, 4 signatures added about 48 kB
 
@@ -363,6 +363,7 @@ def flatten_pdf(source: Path, target: Path) -> None:
         for page in doc:
             image = page.get_pixmap(dpi=FLATTEN_DPI, colorspace=pymupdf.csGRAY).tobytes("jpeg", jpg_quality=70)
             flat.new_page(width=page.rect.width, height=page.rect.height).insert_image(page.rect, stream=image)
+        flat.set_metadata({"producer": FLAT_MARK})
         flat.save(target, garbage=4, deflate=True)
 
 
@@ -380,39 +381,28 @@ def keep_original(path: Path) -> Path:
 
 
 def prepare_pdf(path: Path, say: Callable[[str], None]) -> None:
-    """Before signing, on every PDF: it must open in PyMuPDF; cut bytes after the last startxref/%%EOF
-    (a portal download came with an HTML page glued on), a plain cut so existing signatures stay
-    intact; recompress and, if need be, flatten if signing would push it past the per-file cap.
-    The untouched original goes to FOLDER/.original/ first."""
-    data = path.read_bytes()
-    ends = [m.end() for m in _PDF_END.finditer(data)]
-    clean = data[:ends[-1]] + b"\n" if ends and data[ends[-1]:].strip() else data
+    """Before signing, on every PDF: rasterise the pages (flatten_pdf). That makes any file the portal
+    can parse, drops bytes glued on after %%EOF and turns existing signatures into plain page images.
+    The untouched original goes to FOLDER/.original/ first; a flat file is left alone on a rerun."""
     import pymupdf
     try:
-        doc = pymupdf.open(stream=clean, filetype="pdf")
+        with pymupdf.open(path) as doc:
+            if doc.metadata.get("producer") == FLAT_MARK:
+                return
+            pages = len(doc)
     except Exception as exc:
         raise Stop(f"{path.name} cannot be read as a PDF ({exc}); nothing was signed") from None
-    with doc:
-        pages = len(doc)
-        fits = lambda size: size + SIGN_OVERHEAD_PER_PAGE * pages <= PORTAL_FILE_CAP  # noqa: E731
-        if clean is data and fits(len(data)):
-            return
-        kept = keep_original(path)
-        fixed = path.with_name(f".{path.name}.fixing")
-        try:
-            note = "trailing bytes removed"
-            fixed.write_bytes(clean)
-            if not fits(len(clean)):
-                doc.save(fixed, garbage=4, deflate=True)
-                note = "recompressed"
-                if not fits(fixed.stat().st_size):
-                    flatten_pdf(path, fixed)
-                    note = ("flattened to images to stay under the portal's 2 MiB cap once signed" if fits(fixed.stat().st_size)
-                            else "flattened to images, but it may still pass the portal's 2 MiB cap once signed")
-            fixed.replace(path)
-        finally:
-            fixed.unlink(missing_ok=True)
-    say(f"fixed {path.name}: {note} (original kept as {kept})")
+    kept = keep_original(path)
+    flat = path.with_name(f".{path.name}.flat")
+    try:
+        flatten_pdf(path, flat)
+        size = flat.stat().st_size
+        flat.replace(path)
+    finally:
+        flat.unlink(missing_ok=True)
+    over = size + SIGN_OVERHEAD_PER_PAGE * pages > PORTAL_FILE_CAP
+    say(f"flattened {path.name} ({size // 1024} kB, original kept as {kept})"
+        + ("; warning: it may pass the portal's 2 MiB cap once signed" if over else ""))
 
 
 # ---------------------------------------------------------------- draft text
