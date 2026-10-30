@@ -94,6 +94,10 @@ icegate ecopy be --today
 icegate ecopy search BE --location INMBD6 --job-number 123 --job-date 2026-10-28 --json
 icegate ecopy download ack --filename <downloadUrl> --output acknowledgement.ack
 icegate ecopy download --irn <irn> -o signed-copy.pdf
+icegate ecopy search GATEPASS --from 2026-10-27 --to 2026-10-27 --json   # SB35 gatepass records
+icegate report job-status --json                  # latest ~200 bills, every column
+icegate my-iec --json                             # all IEC clients
+icegate enquiry sb --location INMBD6 --sb-no 6817710 --sb-date 2026-09-14 --json   # public, no login
 ```
 
 `ecopy sb`, `ecopy be`, and `ecopy search` retrieve Shipping Bill (`SB`) or Bill of Entry (`BE`) records

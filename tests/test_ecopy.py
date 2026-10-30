@@ -27,7 +27,7 @@ class FakeSession:
         return SimpleNamespace(status_code=self.status, json=lambda: self.result)
 
 
-@pytest.mark.parametrize("kind", ["SB", "BE"])
+@pytest.mark.parametrize("kind", ["SB", "BE", "GATEPASS"])
 def test_date_search_uses_portal_contract(kind):
     session = FakeSession([{"jobNo": "123"}])
     result = ECopyClient(session).search_by_date(kind, date(2026, 10, 27), date(2026, 10, 28))
@@ -35,7 +35,7 @@ def test_date_search_uses_portal_contract(kind):
     method, url, kwargs = session.calls[0]
     assert method == "POST"
     assert url.endswith("/dashboard-utility/download-utility/searchByDate")
-    assert kwargs["json_body"] == {"icegateId": "TEST", "documentType": kind,
+    assert kwargs["json_body"] == {"icegateId": "TEST", "documentType": {"GATEPASS": "LEOGate"}.get(kind, kind),
                                     "fromDate": "2026-10-27T00:00:00.000Z",
                                     "toDate": "2026-10-28T00:00:00.000Z"}
 
@@ -166,8 +166,8 @@ def test_cli_download_signed_writes_private_pdf_without_overwriting(tmp_path, mo
 
 
 def test_download_rejects_portal_http_error_without_retry():
-    session = FakeSession(None, status=409)
-    with pytest.raises(IcegateError, match='HTTP 409'):
+    session = FakeSession(None, status=500)
+    with pytest.raises(IcegateError, match='HTTP 500'):
         ECopyClient(session).download_ack('record.ack')
     assert len(session.calls) == 1
 
@@ -183,3 +183,8 @@ def test_download_cli_does_not_create_file_after_portal_error(tmp_path, monkeypa
     assert cli.main(['ecopy', 'download', 'ack', '--filename', 'record.ack', '--output', str(output),
                      '--state-dir', str(tmp_path / 'state')]) == 1
     assert not output.exists()
+
+
+def test_download_409_says_portal_is_still_retrieving():
+    with pytest.raises(IcegateError, match="retry in about 60 minutes"):
+        ECopyClient(FakeSession({}, status=409)).download_signed("1234567890123456", "USER")

@@ -68,6 +68,9 @@ hashes. Staging is ephemeral: the row lives in the current eSANCHIT
 | `src/icegate_client/esanchit/data/document_codes.txt` | bundled eSANCHIT codes |
 | `src/icegate_client/filing/client.py` | signed SB/BE filing upload and per-file receipts |
 | `src/icegate_client/ecopy.py` | read-only Shipping Bill and Bill of Entry searches and downloads |
+| `src/icegate_client/jobstatus.py` | read-only Shipping Bill Job Status detailed report |
+| `src/icegate_client/myiec.py` | read-only My IEC client list |
+| `src/icegate_client/enquiry.py` | public Shipping Bill enquiry, no login |
 | `tests/` | mocked tests, no network |
 
 ## Protocol facts (observed 2026-10-28)
@@ -91,6 +94,24 @@ use Asia/Kolkata calendar dates. A 27 October search returned four BE and 15
 SB records; the portal's BE page showed those four alongside the 28 October
 record when searched for 27–28 October. `downloadUrl` is a portal filename,
 not necessarily a complete URL.
+
+Read-only reports (observed 2026-10-30, live-tested):
+- Gatepass (SB35) is an e-copy kind: `documentType: "LEOGate"` on the same
+  `searchByDate`/`searchByJobNumber` calls; CLI kind `GATEPASS`. The list holds the
+  same bills as SB; records without `irn`/`userId` have no gatepass yet. Download is
+  the same `/esanchit/getDocument` call. Old bills answer HTTP 409 "available in next
+  60 min" (queued retrieval); retry later. The PDF carries IEC, exporter, containers.
+- `POST /dashboard/jobStatus/sbExcel` with `{icegateId, roleId,
+  userType}` (lowercase user type from login). No date parameters: always the latest
+  ~200 bills. The xlsx columns are Location Code, IEC, SB No, SB date, Status, Job No,
+  Job Date, Error, Control Number; all are kept, empty ones as `""`.
+- `POST /dashboard/myIec/getMyIecDetails/` with `{icegateId, roleId, iec, locationCode}`
+  returns every client in one response (`locationCode`, `iecName`, `iecCode`); an IEC
+  can repeat per location and can carry two names.
+- `POST /enquiry/publicEnquiries/SBTrack_Ices_action_Public` with `{location, sbNo,
+  sbDate: "YYYYMMDD"}`, no auth headers. One response holds every section, including
+  empty ones. It also works for `INSTT6`, which the public form's list omits. IEC and
+  GSTIN are masked by the portal.
 
 - `POST /identity/ext-login` with `{icegateId, password, usertype:"external"}`.
   The password is base64 AES-128-ECB/PKCS7 with a key published in the SPA

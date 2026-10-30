@@ -17,6 +17,9 @@ from zoneinfo import ZoneInfo
 
 from . import __version__
 from .ecopy import ECopyCache, ECopyClient
+from .enquiry import EnquiryClient
+from .jobstatus import JobStatusClient
+from .myiec import MyIecClient
 from .esanchit.client import EsanchitClient
 from .esanchit.doc_types import DocumentCatalog
 from .esanchit.page import StagedRow, split_option
@@ -625,6 +628,43 @@ def cmd_ecopy_search(ctx: Context, _args: argparse.Namespace | None = None) -> i
     return 0
 
 
+def cmd_report_job_status(ctx: Context, _args: argparse.Namespace | None = None) -> int:
+    ctx.authenticate()
+    rows = JobStatusClient(ctx.session).detailed()
+    if ctx.args.json:
+        print(_json(rows, indent=2))
+    elif rows:
+        keys = list(rows[0])
+        _say(_table(keys, [[str(row.get(key) or "") for key in keys] for row in rows]))
+    else:
+        _say("no records found")
+    return 0
+
+
+def cmd_my_iec(ctx: Context, _args: argparse.Namespace | None = None) -> int:
+    ctx.authenticate()
+    rows = MyIecClient(ctx.session).list(ctx.args.iec, ctx.args.location)
+    if ctx.args.json:
+        print(_json(rows, indent=2))
+    elif rows:
+        keys = ["iecCode", "iecName", "locationCode"]
+        _say(_table(["IEC", "name", "location"], [[str(row.get(key) or "") for key in keys] for row in rows]))
+    else:
+        _say("no records found")
+    return 0
+
+
+def cmd_enquiry_sb(ctx: Context, _args: argparse.Namespace | None = None) -> int:
+    args = ctx.args
+    body = EnquiryClient(ctx.session).shipping_bill(args.location, args.sb_no, args.sb_date)
+    if args.json:
+        print(_json(body, indent=2))
+    else:
+        for section, rows in body.items():
+            _say(f"{section}: {len(rows) if isinstance(rows, list) else rows}")
+    return 0
+
+
 def cmd_ecopy_download(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     args = ctx.args
     if args.copy_type == "ack":
@@ -870,7 +910,25 @@ def build_parser() -> argparse.ArgumentParser:
     upload.add_argument("--allow-duplicate", action="store_true", help="repeat an attempted file only after reconciliation")
     upload.set_defaults(func=cmd_filing_upload)
 
-    ecopy = sub.add_parser("ecopy", help="search Shipping Bill and Bill of Entry records")
+    report = sub.add_parser("report", help="read-only ICEGATE reports")
+    report_sub = report.add_subparsers(dest="report_command", required=True)
+    job_status = report_sub.add_parser("job-status", parents=[common], help="Shipping Bill job status report (latest rows)")
+    job_status.set_defaults(func=cmd_report_job_status)
+
+    my_iec = sub.add_parser("my-iec", parents=[common], help="list IEC clients (read-only)")
+    my_iec.add_argument("--iec", help="only this IEC code")
+    my_iec.add_argument("--location", help="only this customs location code")
+    my_iec.set_defaults(func=cmd_my_iec)
+
+    enquiry = sub.add_parser("enquiry", help="public enquiries (no login)")
+    enquiry_sub = enquiry.add_subparsers(dest="enquiry_command", required=True)
+    enquiry_sb = enquiry_sub.add_parser("sb", parents=[common], help="Shipping Bill status, all sections")
+    enquiry_sb.add_argument("--location", required=True, help="customs location code, e.g. INMBD6")
+    enquiry_sb.add_argument("--sb-no", required=True, help="shipping bill number")
+    enquiry_sb.add_argument("--sb-date", required=True, type=_date_arg, help="shipping bill date, YYYY-MM-DD")
+    enquiry_sb.set_defaults(func=cmd_enquiry_sb)
+
+    ecopy = sub.add_parser("ecopy", help="search Shipping Bill, Bill of Entry and gatepass records")
     ecopy_sub = ecopy.add_subparsers(dest="ecopy_command", required=True)
     def add_search_options(search):
         search.add_argument("--from", dest="start_date", type=_date_arg, help="start date, YYYY-MM-DD")
@@ -884,9 +942,9 @@ def build_parser() -> argparse.ArgumentParser:
         search.set_defaults(func=cmd_ecopy_search)
 
     search = ecopy_sub.add_parser("search", parents=[common], help="search by date range or job details")
-    search.add_argument("kind", choices=["SB", "BE"], help="document type")
+    search.add_argument("kind", choices=["SB", "BE", "GATEPASS"], help="document type")
     add_search_options(search)
-    for kind in ("SB", "BE"):
+    for kind in ("SB", "BE", "GATEPASS"):
         shortcut = ecopy_sub.add_parser(kind.lower(), parents=[common], help=f"search {kind} records")
         add_search_options(shortcut)
         shortcut.set_defaults(kind=kind)

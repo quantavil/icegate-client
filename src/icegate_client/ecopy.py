@@ -13,6 +13,9 @@ from .shared.errors import IcegateError
 from .shared.session import IcegateSession
 
 
+DOCUMENT_TYPES = {"SB": "SB", "BE": "BE", "GATEPASS": "LEOGate"}
+
+
 class ECopyCache:
     """Remember the portal user ID for each searched IRN, scoped to an account."""
 
@@ -84,6 +87,8 @@ class ECopyClient:
             "POST", self.session.url(path), json_body=payload,
             headers=self.session.auth_headers(), timeout=120,
         )
+        if response.status_code == 409:
+            raise IcegateError("e-copy document is being retrieved by the portal; retry in about 60 minutes")
         if response.status_code != 200:
             raise IcegateError(f"e-copy download failed with HTTP {response.status_code}")
         content = response.content
@@ -95,11 +100,11 @@ class ECopyClient:
         return content
 
     def _search(self, action: str, kind: str, filters: dict[str, str]) -> list[dict[str, Any]]:
-        if kind not in {"SB", "BE"}:
-            raise IcegateError("document type must be SB or BE")
+        if kind not in DOCUMENT_TYPES:
+            raise IcegateError("document type must be SB, BE or GATEPASS")
         response = self.session.send(
             "POST", self.session.url("/dashboard-utility/download-utility/" + action),
-            json_body={**filters, "documentType": kind, "icegateId": self.session.settings.icegate_id},
+            json_body={**filters, "documentType": DOCUMENT_TYPES[kind], "icegateId": self.session.settings.icegate_id},
             headers=self.session.auth_headers(),
         )
         if response.status_code != 200:
