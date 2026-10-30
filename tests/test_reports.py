@@ -31,7 +31,9 @@ class FakeSession:
 
 
 def _xlsx(rows):
-    strings, body = [], []
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    body = []
     for r, row in enumerate(rows, 1):
         cells = []
         for c, value in enumerate(row):
@@ -39,16 +41,17 @@ def _xlsx(rows):
             if value is None:
                 continue
             if isinstance(value, str):
-                strings.append(value)
-                cells.append(f'<c r="{ref}" t="s"><v>{len(strings) - 1}</v></c>')
+                cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{value}</t></is></c>')
             else:
                 cells.append(f'<c r="{ref}"><v>{value}</v></c>')
         body.append(f'<row r="{r}">{"".join(cells)}</row>')
-    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
+        z.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>')
+        z.writestr("_rels/.rels", f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        z.writestr("xl/workbook.xml", f'<workbook xmlns="{ns}" xmlns:r="{rel}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels", f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
         z.writestr("xl/worksheets/sheet1.xml", f'<worksheet xmlns="{ns}"><sheetData>{"".join(body)}</sheetData></worksheet>')
-        z.writestr("xl/sharedStrings.xml", f'<sst xmlns="{ns}">' + "".join(f"<si><t>{s}</t></si>" for s in strings) + "</sst>")
     return out.getvalue()
 
 

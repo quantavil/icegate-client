@@ -247,7 +247,7 @@ and receipt path; a filing 202 is not final, the filing-status email decides.
 
 - Python 3.11+, type hints, `from __future__ import annotations`.
 - No new runtime dependencies without a reason; the current set is `requests`,
-  `cryptography`, `certifi`, `lxml`, `pyhanko`, `filelock`. `pyhanko` brings
+  `cryptography`, `certifi`, `lxml`, `pyhanko`, `filelock`, `python-calamine` (xlsx reading only). `pyhanko` brings
   `aiohttp` and `asn1crypto` transitively; that is the price of real signature
   validation. Do not add `httpx`, `tenacity`, `typer` or `pydantic`.
 - Parsing is lxml, not a hand-rolled tree. Never enable entity resolution or
