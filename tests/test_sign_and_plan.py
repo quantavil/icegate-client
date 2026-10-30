@@ -4,6 +4,10 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="sign-and-plan.sh is Linux/macOS only")
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "sign-and-plan.sh"
 
 
