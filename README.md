@@ -170,27 +170,58 @@ provide a timezone), independent of the computer’s timezone.
 Workflow commands accept `--json`, `--env-file`, `--state-dir`,
 `--no-journal` and `-v`.
 
-## Sign and prepare a plan
-
-On Linux or macOS, `scripts/sign-and-plan.sh` uses the private
-`~/Downloads/Signer/sign-all.sh` utility and the separately installed
-`icegate-sign` to sign only the named files. It creates `_Signed` files next
-to the inputs, refuses existing outputs and runs a local dry run. It does not
-upload or submit anything.
+## One command: sign, pick, confirm, upload
 
 ```bash
-scripts/sign-and-plan.sh pdf --type 331000 -- invoice.pdf
-scripts/sign-and-plan.sh filing -- declaration.sb
+scripts/icegate-run.py ~/Downloads/Files                          # Linux/macOS
+uv run scripts/icegate-run.py C:\Users\you\Files                  # Windows (no shebang)
 ```
 
-Use the signed file paths and the printed challenge in the corresponding
-`icegate esanchit submit --confirm ...` or `icegate filing upload --confirm ...`
-command after reviewing the plan. The document code above is an example; use
-the correct code for your documents. The wrapper accepts multiple files of the
-same kind; PDF files in a batch share the specified code. It uses `uv` from
-PATH and runs the client from this checkout. The signer script remains private
-and outside this repository; `ICEGATE_SIGN_SCRIPT` can point to another private
-copy. Signing errors stop the workflow before planning.
+A personal workflow around the client, not part of it. Both scripts are plain Python and
+system-neutral. The token driver is not: the signing library currently supports Linux only
+(vendor `libcastle_v2.so`), so signing elsewhere waits on that support. `--no-sign` lets
+the upload half run anywhere on files signed elsewhere. The script declares its one
+dependencies (`questionary` for the prompts, `rich` for the tables and spinner, `pymupdf` for the flatten retry) in a header, so `uv` installs it on first run; the client's
+own dependencies are unchanged. It does this, in order:
+
+1. **Sign.** Unsigned `.pdf`, `.sb` and `.be` files are signed by running
+   `scripts/sign-all.py FOLDER` as a separate program (`--no-sign` skips this). The
+   signer alone handles the token and PIN; the script never sees them.
+2. **Pick files.** A checklist of the signed files (all ticked). Names already uploaded
+   in an earlier run (kept in a small ledger in the state directory, since a re-signed
+   copy has new bytes) are skipped.
+3. **Pick the document type per PDF.** A searchable list of every code in
+   `document_codes.txt`, with the best guess from the file name pre-selected, so Enter
+   accepts it. The guess comes from the catalogue alone: a multi-word catalogue name
+   found whole in the file name, such as "commercial invoice", or "invoice" plus
+   "packing list" meaning 331000. `INV` and `PL` are read as invoice and packing
+   list, so `INV&PL 123` gets 331000; `INV` alone only suggests candidates.
+   Without a terminal it uses a code only when exactly one entry fits, otherwise stops.
+4. **Confirm.** It shows the client's upload plan (files, sizes, signature checks,
+   codes) and asks once; `--yes` skips the question and is needed when not on a
+   terminal. It then passes the plan's challenge to the client's `--confirm`. An
+   unknown outcome stops the run with "do not re-run".
+   If the portal refuses a PDF as "not a valid PDF file" (it submitted nothing), the
+   script offers one retry: it flattens the pages to images (PyMuPDF, 120 dpi grayscale),
+   signs the flat copy, shows a new plan and asks again. The unflattened original is kept
+   in `FOLDER/.original/`. Flattening loses selectable text, so it is never done unasked.
+5. **Draft and archive.** It writes the reply as HTML tables (eSANCHIT from the
+   receipt, SB from an e-copy search of the last seven days by job number; the number can take a couple of minutes to appear,
+   so it re-checks every 30 s for up to `--wait` seconds, default 240, and Ctrl-C skips it), copies it
+   to the clipboard as rich text (`wl-copy` or `xclip` on Linux; macOS `osascript` and Windows PowerShell are in
+   the code but untested), and moves the
+   originals, signed files and drafts into `Done/<timestamp>/` inside the folder. That
+   folder is created after every upload and is safe to delete.
+
+For an `.sb` file the customs location is read from the file itself (the first field of its
+`<TABLE>SB` record); there is no option for it. If the files name different locations or none can be read, the run stops before anything is sent. `--dry-run` lists the files and guessed codes without signing or uploading. If a run
+stops after an upload, check the portal and mail before trying again.
+
+| Piece | Owns | Never does |
+|---|---|---|
+| `scripts/sign-all.py` (holds the PIN; never commit it) | the token, the PIN, writing `name_Signed.ext` | talk to the portal |
+| `icegate` client | login, plan, challenge, upload, receipts, e-copy | sign, or read the PIN |
+| `scripts/icegate-run.py` | the prompts, code guess, calling the signer and client, draft, `Done/` | touch the PIN or token, bypass a client gate |
 
 ## What the client checks before uploading
 

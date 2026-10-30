@@ -71,7 +71,7 @@ hashes. Staging is ephemeral: the row lives in the current eSANCHIT
 | `src/icegate_client/jobstatus.py` | read-only Shipping Bill Job Status detailed report |
 | `src/icegate_client/myiec.py` | read-only My IEC client list |
 | `src/icegate_client/enquiry.py` | public Shipping Bill enquiry, no login |
-| `scripts/sign-and-plan.sh` | wrapper: copies named files to a temp dir, runs the private signer, writes `_Signed` files, then runs a `--dry-run` plan; never uploads |
+| `scripts/icegate-run.py` | personal one-folder workflow: sign, upload via the CLI gates, draft, archive |
 | `tests/` | mocked tests, no network |
 
 ## Protocol facts (observed 2026-10-28)
@@ -223,12 +223,12 @@ done.
 
 When the user says "sign and upload" files, do not ask for the token PIN.
 Signing goes through the user's script, which keeps the PIN inside itself
-(untracked, mode 700, outside this repo). Never print, echo, log or commit it.
+(`scripts/sign-all.py`: mode 700, never committed). Never print, echo, log or commit it.
 
-1. Copy or move the files into `~/Downloads/Signer`.
-2. Run `SIGN_ALL_IN_TERMINAL=1 ~/Downloads/Signer/sign-all.sh`. It signs every
-   unsigned `.pdf`, `.sb`, `.be`, `.txt`, `.xml` there and writes `name[signed].ext`.
-3. Upload only the `[signed]` files, each time as plan first, then confirm once:
+1. Put the files in one folder (for example `~/Downloads/Files`); the signer takes it as its argument, or let `icegate-run.py FOLDER` call it.
+2. Run `SIGN_ALL_IN_TERMINAL=1 scripts/sign-all.py <folder>`. It signs every
+   unsigned `.pdf`, `.sb`, `.be`, `.txt`, `.xml` there and writes `name_Signed.ext` (spaces become underscores).
+3. Upload only the `_Signed` files, each time as plan first, then confirm once:
 
 ```bash
 uv run icegate filing upload --dry-run <signed .sb/.be>      # prints "challenge FILE N <id>"
@@ -241,6 +241,42 @@ If signing fails with `PinIncorrect`, stop: more tries can lock the token. On a
 5xx or `unknown` outcome do not re-run; read `submit_error_body` in the run
 journal and check mail for the confirmation. Report DRN/IRNs or the HTTP status
 and receipt path; a filing 202 is not final, the filing-status email decides.
+
+## One-folder script
+
+`scripts/icegate-run.py FOLDER` is the owner's one-command workflow. Boundaries:
+
+- The private signer (`scripts/sign-all.py`) owns the token and PIN. The script runs it as
+  a separate program and never reads, prints or logs the PIN.
+- The client owns every portal gate. The script uses `--dry-run`, shows the plan, asks
+  the user once, then passes the printed challenge to `--confirm`. It never adds
+  `--allow-duplicate`, never retries, and keeps a ledger of uploaded signed names.
+- **Invalid-PDF refusal (observed 2026-10-30).** The portal can answer `<name> is not a valid PDF file`
+  for a structurally fine, validly signed Excel export (14 pages, 14 signatures). Rewriting it with
+  pikepdf, Ghostscript or PyMuPDF changed nothing; rasterising each page (120 dpi, grayscale JPEG,
+  PyMuPDF) and signing that was accepted. Nothing is submitted on that refusal, so the script offers one
+  flattened retry: a new yes, the unflattened original kept in `FOLDER/.original/`, a fresh plan and a
+  second yes. It is never automatic and never repeats. Do not raise the dpi: a signed 14-page file must stay
+  under the 2 MiB per-file cap. Flattening loses selectable text.
+- The script owns only: the prompts and tables (questionary and rich, declared in its own header, not
+  client dependencies), choosing codes from `document_codes.txt` (the user picks per
+  file, the guess pre-selected; no terminal means only an unambiguous code), the reply
+  draft and clipboard, and moving files into `Done/<timestamp>/`.
+
+### Running it
+
+`~/.local/bin/upload` is a symlink to `scripts/icegate-run.py`, so from any folder:
+
+```bash
+upload ~/Downloads/Files            # sign, pick files and types, confirm, upload, draft
+upload ~/Downloads/Files --dry-run  # preview only: files and guessed codes
+```
+
+Plug in the token first. The script finds the client and `sign-all.py` by following the link, reads
+the customs location from the `.sb` file itself (asks only if it cannot), and puts the reply draft on the
+clipboard. Recreate the link on a new machine with
+`ln -s ~/Documents/icegate-client/scripts/icegate-run.py ~/.local/bin/upload`.
+Agents: never run it for the user without being asked; it signs with the token and uploads.
 
 ## Style
 
