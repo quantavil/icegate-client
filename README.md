@@ -2,7 +2,7 @@
 
 Licensed under GPL-3.0-or-later; see [LICENSE](LICENSE).
 
-Unofficial browser-free client for ICEGATE, eSANCHIT and electronic filing. It logs in with the same
+Unofficial browser-free client for ICEGATE, eSANCHIT, electronic filing and read-only reports. It logs in with the same
 endpoints the portal's own JavaScript uses, refreshes the dashboard token,
 performs the dashboard to eSANCHIT handoff, uploads already-signed PDFs, and
 can submit one staged batch to obtain the DRN and IRN. Electronic filing
@@ -192,9 +192,6 @@ PATH and runs the client from this checkout. The signer script remains private
 and outside this repository; `ICEGATE_SIGN_SCRIPT` can point to another private
 copy. Signing errors stop the workflow before planning.
 
-The previous top-level `handoff`, `stage`, `submit`, and `doc-types` commands
-remain available for compatibility.
-
 ## What the client checks before uploading
 
 - `%PDF-` header and at least one page;
@@ -218,7 +215,7 @@ from documentation. Everything below was read on 2026-10-28.
 
 | Source | Per file | Per batch | Notes |
 |---|---|---|---|
-| ICEGATE FAQ (`/help/faq`) | "lesser than 1 MB" | "max 5 documents" | stale; the FAQ also still says the 1 MB figure |
+| ICEGATE FAQ (`/help/faq`) | "lesser than 1 MB" | "max 5 documents" | stale |
 | eSANCHIT step-by-step PDF (2022-04) | 1 MB | "maximum 5 documents" | stale |
 | Upload dialog, live page text | "Maximum size per file is 2 MB." | "The total number of maximum files are 5 per DRN." | current |
 | Upload dialog, live JS | `maxSize = parseInt('2097152')` = 2 MiB | `upoadSize > 10485760` for a broker account | per-request cap, not per batch |
@@ -322,26 +319,16 @@ and exits 3. It never retries, because a retry can create a second DRN.
 
 Receipts are JSON, one per plan (mode 0600 on POSIX). `--allow-duplicate` is the only way
 to submit the same plan again, and it has to be typed on purpose.
-This guard only covers the same plan in the same state directory; it cannot
-detect submissions made elsewhere or plans with different names or codes.
+These local protections reduce duplicate risk but cannot guarantee exactly-once
+processing. The guard covers only the same plan in the same state directory; it
+cannot detect submissions made elsewhere or plans with different names or codes.
 Check confirmation mail for existing uploads before submitting.
-
-These local protections reduce duplicate risk; they cannot guarantee exactly
-once processing by the portal, or detect a previous upload under a different
-plan or state directory.
 
 ## Known limits
 
 - Browser-free login worked without an OTP challenge in live tests. Per the
   user's request, the client has no OTP fallback; rejected logins stop.
-- The absolute server-side session cap beyond 35 minutes of refresh has not
-  been measured.
-- Staged rows do not survive a new eSANCHIT session, so upload and submit must
-  run in one process; `icegate esanchit submit` does that by design.
-- The reusable client's two-file submission succeeded on 2026-10-29: both
-  response rows reported successful signature verification and their DRN and
-  IRNs matched the ICEGATE confirmation email, including both document types.
-  Other response shapes and automated reconciliation remain unverified.
+- Other submit response shapes and automated reconciliation remain unverified.
 - No delete, no beneficiary editing, no CSV tracking.
 
 ## Journal

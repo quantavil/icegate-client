@@ -113,7 +113,6 @@ Read-only reports (observed 2026-10-30, live-tested):
   sbDate: "YYYYMMDD"}`, no auth headers. One response holds every section, including
   empty ones. It also works for `INSTT6`, which the public form's list omits. IEC and
   GSTIN are masked by the portal.
-
 - `POST /identity/ext-login` with `{icegateId, password, usertype:"external"}`.
   The password is base64 AES-128-ECB/PKCS7 with a key published in the SPA
   bundle. It is obfuscation, not a secret.

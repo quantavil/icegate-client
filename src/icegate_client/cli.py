@@ -890,7 +890,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="icegate",
-        description="Unofficial browser-free ICEGATE client for eSANCHIT and electronic filing.",
+        description="Unofficial browser-free ICEGATE client for eSANCHIT, electronic filing and read-only reports.",
     )
     parser.add_argument("--version", action="version", version=f"icegate-client {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
