@@ -433,3 +433,47 @@ def test_each_table_is_copied_as_soon_as_it_exists(tmp_path, monkeypatch):
     assert go(folder, tmp_path, FakeRun(tmp_path)) == 0
     assert len(copied) == 2
     assert "IRN and DRN" in copied[0] and "Shipping Bill Numbers" in copied[1]
+
+
+def test_windows_clipboard_reads_redirected_stdin(monkeypatch):
+    # `$input` is pipeline input, not stdin: the PowerShell branch pasted nothing before.
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform="win32"))
+    argv, data = mod.clipboard_command("<b>ümlaut & co</b>")
+    assert argv[:4] == ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
+    assert "OpenStandardInput" in argv[-1] and "Set-Clipboard -AsHtml" in argv[-1]
+    assert data == "<b>ümlaut & co</b>".encode("utf-8")
+
+
+def test_copy_html_passes_the_draft_on_stdin(monkeypatch):
+    calls = []
+
+    class Done:
+        returncode = 0
+
+    monkeypatch.undo()  # the fixture replaces copy_html itself
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(mod.subprocess, "run", lambda argv, **kw: calls.append(kw) or Done())
+    assert mod.copy_html("<p>hi</p>") is True
+    assert calls[0]["input"] == b"<p>hi</p>"
+
+
+def test_copy_html_is_false_without_a_clipboard_tool(monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(mod, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(mod.shutil, "which", lambda _: None)
+    assert mod.clipboard_command("<b>x</b>") is None
+    assert mod.copy_html("<b>x</b>") is False
+
+
+def test_client_runner_forces_utf8_output(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod, "STATE_ENV", None)
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    mod.client_runner()(["esanchit", "doc-types", "invoice"])
+    assert seen["encoding"] == "utf-8" and seen["errors"] == "replace"
+    assert seen["env"]["PYTHONUTF8"] == "1" and seen["env"]["PYTHONIOENCODING"] == "utf-8"

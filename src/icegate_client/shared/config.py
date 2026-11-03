@@ -1,6 +1,6 @@
 """Configuration and credential loading.
 
-Secrets come from environment variables or an ignored mode-0600 env file. They
+Secrets come from environment variables or an ignored private env file. They
 are never committed or written to the journal or console.
 """
 
@@ -22,7 +22,7 @@ DEFAULT_USER_AGENT = (
 
 ENV_TEMPLATE = """\
 # ICEGATE credentials for icegate-client.
-# Keep this file mode 0600 and never commit it.
+# Keep this file private and never commit it.
 ICEGATE_USERNAME=
 ICEGATE_PASSWORD=
 """
@@ -42,6 +42,15 @@ def default_state_dir() -> Path:
 def default_env_file() -> Path:
     root = Path(__file__).resolve().parents[3]
     return (root if (root / "pyproject.toml").is_file() else Path.cwd()) / ".env"
+
+
+def env_file_hint() -> str:
+    """How to provide credentials when they are missing, worded for this platform."""
+    path = default_env_file()
+    if os.name == "nt":
+        return (f"Create {path} and restrict its folder permissions to your account, "
+                "or set both environment variables")
+    return f"Create {path} with mode 0600, or export both variables"
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
@@ -136,8 +145,7 @@ class Settings:
         password = pick("ICEGATE_PASSWORD")
         if not icegate_id or not password:
             raise ConfigError(
-                "ICEGATE_USERNAME and ICEGATE_PASSWORD are not set. "
-                f"Create {default_env_file()} with mode 0600, or export both variables."
+                "ICEGATE_USERNAME and ICEGATE_PASSWORD are not set. " + env_file_hint()
             )
 
         chosen_state = state_dir or pick("ICEGATE_STATE_DIR")

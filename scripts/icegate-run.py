@@ -256,7 +256,9 @@ def sign_folder(folder: Path, signer: Path, say: Callable[[str], None]) -> None:
     say(f"signing with {signer.name} (the token must be plugged in)...")
     command = [sys.executable, str(signer)] if signer.suffix == ".py" else [str(signer)]
     try:
-        done = subprocess.run([*command, str(folder)], env={**clean_env(), "SIGN_ALL_IN_TERMINAL": "1"}, check=False)
+        done = subprocess.run([*command, str(folder)],
+                              env={**clean_env(), "SIGN_ALL_IN_TERMINAL": "1", "PYTHONUTF8": "1"},
+                              check=False)
     except OSError as exc:
         raise Stop(f"cannot run the signer: {exc.strerror}") from None
     if done.returncode:
@@ -289,10 +291,12 @@ def scan(folder: Path, ledger: Ledger, say: Callable[[str], None]) -> tuple[list
 # ---------------------------------------------------------------- upload via the client
 def client_runner() -> Runner:
     extra = ["--state-dir", str(STATE)] if STATE_ENV else []
+    env = {**clean_env(), "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
     def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["uv", "run", "--project", str(CLIENT), "icegate", *argv, *extra],
-                              capture_output=True, text=True, check=False, env=clean_env())
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              check=False, env=env)
     return run
 
 
@@ -480,20 +484,28 @@ def sb_draft(run: Runner, location: str, jobs: list[str], today: date, wait: flo
         raise Stop("stopped waiting for the SB number") from None
 
 
-def copy_html(text: str) -> bool:
-    """Put HTML on the clipboard as rich text; False when no tool worked.
-
-    Linux (wl-copy, xclip) is tested. macOS (osascript) and Windows (PowerShell) are not."""
+def clipboard_command(text: str) -> tuple[list[str], bytes | None] | None:
+    """The program that puts `text` on the clipboard as rich text, and the stdin it needs."""
     if sys.platform == "darwin":
-        argv, data = ["osascript", "-e", f"set the clipboard to \u00abdata HTML{text.encode().hex()}\u00bb"], None
-    elif sys.platform == "win32":
-        argv, data = ["powershell", "-NoProfile", "-Command", "$input | Out-String | Set-Clipboard -AsHtml"], text.encode()
-    else:
-        argv = next(([t, *a] for t, a in (("wl-copy", ["--type", "text/html"]),
-                                         ("xclip", ["-selection", "clipboard", "-t", "text/html"])) if shutil.which(t)), None)
-        data = text.encode()
-        if argv is None:
-            return False
+        return ["osascript", "-e", f"set the clipboard to \u00abdata HTML{text.encode().hex()}\u00bb"], None
+    if sys.platform == "win32":
+        # `$input` is pipeline input, not redirected stdin, so it pastes nothing. Read the bytes
+        # ourselves and decode them as UTF-8; Set-Clipboard -AsHtml then writes CF_HTML.
+        script = ("$stdin = [Console]::OpenStandardInput(); $buf = New-Object System.IO.MemoryStream; "
+                  "$stdin.CopyTo($buf); $html = [Text.Encoding]::UTF8.GetString($buf.ToArray()); "
+                  "Set-Clipboard -AsHtml $html")
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", script], text.encode("utf-8")
+    argv = next(([t, *a] for t, a in (("wl-copy", ["--type", "text/html"]),
+                                     ("xclip", ["-selection", "clipboard", "-t", "text/html"])) if shutil.which(t)), None)
+    return (argv, text.encode()) if argv else None
+
+
+def copy_html(text: str) -> bool:
+    """Put HTML on the clipboard as rich text; False when no tool worked."""
+    command = clipboard_command(text)
+    if command is None:
+        return False
+    argv, data = command
     try:
         return subprocess.run(argv, input=data, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               check=False, timeout=30).returncode == 0

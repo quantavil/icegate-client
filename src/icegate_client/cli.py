@@ -34,7 +34,6 @@ from .esanchit.submission import SubmissionService, SubmitOutcome, SubmitPlan
 from .filing.client import FilingOutcome, FilingPlan, FilingService
 from .shared.config import (
     Settings,
-    default_env_file,
     mask_identifier,
     write_env_template,
 )
@@ -769,13 +768,7 @@ def cmd_doctor(ctx: Context | None, args: argparse.Namespace) -> int:
         )
         checks.append(("config", True, settings.describe()))
     except ConfigError as exc:
-        checks.append(
-            (
-                "config",
-                False,
-                f"{exc} (create {default_env_file()} with mode 0600)",
-            )
-        )
+        checks.append(("config", False, str(exc)))
 
     try:
         bundle = build_ca_bundle(settings.state_dir if settings else Path.home() / ".local/state/icegate-client")

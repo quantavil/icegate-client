@@ -72,6 +72,7 @@ hashes. Staging is ephemeral: the row lives in the current eSANCHIT
 | `src/icegate_client/myiec.py` | read-only My IEC client list |
 | `src/icegate_client/enquiry.py` | public Shipping Bill enquiry, no login |
 | `scripts/icegate-run.py` | personal one-folder workflow: sign, upload via the CLI gates, draft, archive |
+| `scripts/upload.cmd` | Windows launcher for `icegate-run.py` |
 | `tests/` | mocked tests, no network |
 
 ## Protocol facts (observed 2026-10-28)
@@ -224,6 +225,10 @@ done.
 When the user says "sign and upload" files, do not ask for the token PIN.
 Signing goes through the user's script, which keeps the PIN inside itself
 (`scripts/sign-all.py`: mode 700, never committed). Never print, echo, log or commit it.
+On Windows run it as `uv run scripts\sign-all.py FOLDER`; it finds the vendor PKCS#11
+module (`%SystemRoot%\System32\eps2003csp11v2.dll`, installed by the token driver EXE)
+and hands it to `icegate-sign` as `ICEGATE_PKCS11_MODULE`. Override with that variable
+if the module lives elsewhere.
 
 1. Put the files in one folder (for example `~/Downloads/Files`); the signer takes it as its argument, or let `icegate-run.py FOLDER` call it.
 2. Run `SIGN_ALL_IN_TERMINAL=1 scripts/sign-all.py <folder>`. It signs every
@@ -272,6 +277,9 @@ and receipt path; a filing 202 is not final, the filing-status email decides.
 upload ~/Downloads/Files            # sign, pick files and types, confirm, upload, draft
 upload ~/Downloads/Files --dry-run  # preview only: files and guessed codes
 ```
+
+On Windows there is no shebang; use `scripts\upload.cmd FOLDER` (add the `scripts`
+folder to `PATH` if you want to type `upload`). It runs the same script through `uv`.
 
 Plug in the token first. The script finds the client and `sign-all.py` by following the link, reads
 the customs location from the `.sb` file itself (asks only if it cannot), and puts the reply draft on the

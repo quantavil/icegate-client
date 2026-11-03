@@ -19,6 +19,26 @@ if not target.is_dir():
     sys.exit(f"folder not found: {target}")
 here = str(Path(__file__).resolve())
 
+
+def windows_pkcs11() -> str | None:
+    """The PKCS#11 module the HYP2003 Windows driver (vendor EXE) installs."""
+    root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    for folder in (root / "System32", root / "SysWOW64"):
+        for name in ("eps2003csp11v2.dll", "castle_v2.dll"):
+            if (folder / name).is_file():
+                return str(folder / name)
+    return None
+
+
+# icegate-sign reads this when it loads, so it must be set before the import below. On Linux the
+# vendored libcastle_v2.so is found by itself.
+if os.name == "nt" and not os.environ.get("ICEGATE_PKCS11_MODULE"):
+    if (module := windows_pkcs11()):
+        os.environ["ICEGATE_PKCS11_MODULE"] = module
+    else:
+        print("warning: no PKCS#11 module found; install the token's Windows driver or set ICEGATE_PKCS11_MODULE",
+              file=sys.stderr)
+
 # Linux only: started from a file manager (no terminal), reopen in one so the result is visible.
 if (sys.platform.startswith("linux") and not sys.stdin.isatty() and not os.environ.get("SIGN_ALL_IN_TERMINAL")
         and (os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")) and shutil.which("rio")):
@@ -32,8 +52,14 @@ try:
 except ImportError:  # run again inside the icegate-sign environment
     project = Path(os.environ.get("ICEGATE_SIGN_DIR", "~/Documents/icegate-sign")).expanduser()
     if not project.is_dir():
-        sys.exit(f"icegate-sign project not found at {project}; set ICEGATE_SIGN_DIR")
-    sys.exit(subprocess.run(["uv", "run", "--project", str(project), "python", here, str(target)], check=False).returncode)
+        sys.exit(f"icegate-sign not installed at {project}: clone "
+                 "https://github.com/quantavil/icegate-sign there, or set ICEGATE_SIGN_DIR")
+    try:
+        done = subprocess.run(["uv", "run", "--project", str(project), "python", here, str(target)],
+                              env={k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}, check=False)
+    except OSError as exc:
+        sys.exit(f"cannot run uv ({exc.strerror}); install uv or run this inside the icegate-sign environment")
+    sys.exit(done.returncode)
 sys.argv = [here, str(target)]
 
 import subprocess

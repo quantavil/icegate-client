@@ -52,7 +52,7 @@ uv tool install .
 icegate --help
 ```
 
-Run `uv tool update-shell` and restart the terminal if `icegate` is not on your PATH. For development, `uv sync` followed by `uv run icegate ...` also works.
+Run `uv tool update-shell` and restart the terminal if `icegate` is not on your PATH. For development, `uv sync` followed by `uv run icegate ...` also works. On Windows, `uv tool install --editable .` keeps the installed command pointed at the checkout, so edits apply without reinstalling.
 
 ## Configure
 
@@ -175,12 +175,17 @@ Workflow commands accept `--json`, `--env-file`, `--state-dir`,
 ```bash
 scripts/icegate-run.py ~/Downloads/Files                          # Linux/macOS
 uv run scripts/icegate-run.py C:\Users\you\Files                  # Windows (no shebang)
+scripts\upload.cmd C:\Users\you\Files                             # Windows launcher
 ```
 
 A personal workflow around the client, not part of it. Both scripts are plain Python and
-system-neutral. The token driver is not: the signing library currently supports Linux only
-(vendor `libcastle_v2.so`), so signing elsewhere waits on that support. `--no-sign` lets
-the upload half run anywhere on files signed elsewhere. The script declares its one
+system-neutral. The signer is separate: on Linux `icegate-sign` finds the vendor
+`libcastle_v2.so` in `~/.local/lib/hyp2003/`; on Windows the driver EXE from the token
+vendor installs `eps2003csp11v2.dll` in `System32`, and `sign-all.py` passes it to
+`icegate-sign` as `ICEGATE_PKCS11_MODULE`. Install the signer once per machine:
+`git clone https://github.com/quantavil/icegate-sign` to `~/Documents/icegate-sign`
+(or set `ICEGATE_SIGN_DIR`); it runs in its own uv environment. `--no-sign` lets
+the upload half run anywhere on files signed elsewhere. The script declares its own
 dependencies (`questionary` for the prompts, `rich` for the tables and spinner, `pymupdf` to flatten PDFs) in a header, so `uv` installs it on first run; the client's
 own dependencies are unchanged. It does this, in order:
 
@@ -206,8 +211,8 @@ own dependencies are unchanged. It does this, in order:
 5. **Draft and archive.** It writes the reply as HTML tables (eSANCHIT from the
    receipt, SB from an e-copy search of the last seven days by job number; the number can take a couple of minutes to appear,
    so it re-checks every 30 s for up to `--wait` seconds, default 600, and Ctrl-C skips it), copies each
-   table to the clipboard as rich text the moment it exists (IRN/DRN first, then the SB table when it appears; paste in between) (`wl-copy` or `xclip` on Linux; macOS `osascript` and Windows PowerShell are in
-   the code but untested), and moves the
+   table to the clipboard as rich text the moment it exists (IRN/DRN first, then the SB table when it appears; paste in between) (`wl-copy` or `xclip` on Linux, Windows PowerShell; macOS `osascript` is
+   in the code but untested), and moves the
    originals, signed files and drafts into `Done/<timestamp>/` inside the folder. That
    folder is created after every upload and is safe to delete.
 
