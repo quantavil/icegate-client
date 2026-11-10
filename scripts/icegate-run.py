@@ -759,19 +759,26 @@ def copy_html(text: str) -> bool:
 def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str = "SB") -> list[dict]:
     rows = []
     for number, job_date in dict.fromkeys(jobs):
-        out = run(["ecopy", "search", kind, "--location", location, "--job-number", number,
-                   "--job-date", job_date, "--json"])
-        if out.returncode:
-            raise Stop(f"{kind} search failed: {(out.stderr or out.stdout).strip()[:200]}")
-        try:
-            found = json.loads(out.stdout)
-        except ValueError:
-            raise Stop(f"{kind} search returned invalid JSON") from None
         expected_date = date.fromisoformat(job_date).strftime("%d-%m-%Y")
-        match = [r for r in found if str(r.get("jobNumber")) == number
-                 and str(r.get("location") or location).casefold() == location.casefold()
-                 and (not r.get("jobDate") or portal_date(r["jobDate"]) == expected_date)
-                 and r.get("docNumber") and r.get("docDate")]
+        # The record's job number (what the portal's notices use) can be the e-copy job number minus a
+        # two-digit year suffix (record 642, e-copy 64226), so try the plain number, then the suffixed one.
+        candidates = [number, f"{number}{job_date[2:4]}"]
+        match: list[dict] = []
+        for candidate in candidates:
+            out = run(["ecopy", "search", kind, "--location", location, "--job-number", candidate,
+                       "--job-date", job_date, "--json"])
+            if out.returncode:
+                raise Stop(f"{kind} search failed: {(out.stderr or out.stdout).strip()[:200]}")
+            try:
+                found = json.loads(out.stdout)
+            except ValueError:
+                raise Stop(f"{kind} search returned invalid JSON") from None
+            match = [r for r in found if str(r.get("jobNumber")) == candidate
+                     and str(r.get("location") or location).casefold() == location.casefold()
+                     and (not r.get("jobDate") or portal_date(r["jobDate"]) == expected_date)
+                     and r.get("docNumber") and r.get("docDate")]
+            if match:
+                break
         if not match:
             raise NotYet(f"no {kind} found yet for job {number}")
         if len(match) != 1:

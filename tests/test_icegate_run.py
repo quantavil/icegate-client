@@ -444,9 +444,27 @@ class LateSB(FakeRun):
 
     def __call__(self, argv):
         if argv[:2] == ["ecopy", "search"]:
+            if argv[argv.index("--job-number") + 1] != SB_ROW["jobNumber"]:  # year-suffixed fallback search
+                self.rows = []
+                return super().__call__(argv)
             self.searches += 1
             self.rows = [SB_ROW] if self.searches >= 3 else []
         return super().__call__(argv)
+
+
+def test_sb_number_found_under_year_suffixed_job_number(tmp_path):
+    """Record job 893 filed as e-copy job 89326 (record number + two-digit year)."""
+    row = {**SB_ROW, "jobNumber": "89326", "jobDate": "30-10-2026"}
+
+    class Suffixed(FakeRun):
+        def __call__(self, argv):
+            if argv[:2] == ["ecopy", "search"]:
+                self.rows = [row] if argv[argv.index("--job-number") + 1] == "89326" else []
+            return super().__call__(argv)
+
+    folder = make(tmp_path, "893.sb")
+    assert go(folder, tmp_path, Suffixed(tmp_path), wait=0) == 0
+    assert "89326" in (next((folder / "Done").iterdir()) / "draft-sb.html").read_text()
 
 
 def test_waits_for_the_sb_number_to_appear(tmp_path):
