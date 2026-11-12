@@ -264,10 +264,10 @@ and receipt path; a filing 202 is not final, the filing-status email decides.
   `--allow-duplicate`, never retries, and keeps a ledger of uploaded signed names.
 - **Always flattened before signing (observed 2026-10-30).** The portal can answer `<name> is not a valid PDF file`
   for a structurally fine, validly signed Excel export; rewriting with pikepdf, Ghostscript or PyMuPDF changed
-  nothing, but rasterising each page (120 dpi, grayscale JPEG, PyMuPDF) was accepted. A download with HTML glued
+  nothing, but rasterising each page (120 dpi, grayscale JPEG, PyMuPDF) was accepted. Since 2026-11-12 the script rasterises in colour; the portal has not yet been observed accepting a colour flatten. A download with HTML glued
   on after `%%EOF` also broke the signer. So `prepare_pdf` flattens every unsigned PDF before signing: any old
   signature becomes part of the image, the unflattened original is kept in `FOLDER/.original/`, and a flat
-  file is not flattened again unless its size exceeds the safe cap. If a multi-page document would exceed
+  file is not flattened again unless its size exceeds the safe cap (then it is re-made from the original in `.original/` whose SHA-256 the flat file records, never from the lossy flat copy). If a multi-page document would exceed
   the portal's 2 MiB per-file cap once signed, `prepare_pdf` adaptively compresses it (stepping down DPI and
   JPEG quality) to leave an estimated allowance for signing; actual signed size can vary. If no profile fits,
   preparation stops. Existing signed files are preserved. Flattening loses selectable text. A portal refusal

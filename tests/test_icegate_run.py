@@ -769,6 +769,29 @@ def test_prepare_pdf_recompresses_oversized_flat_file(tmp_path, monkeypatch):
     assert (tmp_path / ".original" / "invoice.pdf").read_bytes() == original_bytes
 
 
+def test_oversized_flat_file_is_recompressed_from_its_true_original(tmp_path, monkeypatch):
+    import pymupdf
+    monkeypatch.undo()
+    path = tmp_path / "invoice.pdf"
+    with pymupdf.open() as doc:
+        for i in range(3):
+            doc.new_page(width=612, height=792).insert_text((50, 50), f"Original page {i}")
+        doc.save(path)
+    original_bytes = path.read_bytes()
+    mod.prepare_pdf(path, lambda _: None)  # first pass: flatten, back up the original
+    monkeypatch.setattr(mod, "PORTAL_FILE_CAP", 40 * 1024)  # a tighter cap makes the flat file oversized
+    monkeypatch.setattr(mod, "SIGN_OVERHEAD_PER_PAGE", 5 * 1024)
+    monkeypatch.setattr(mod, "SAFETY_MARGIN", 5 * 1024)
+    seen = []
+    real = mod.flatten_pdf
+    monkeypatch.setattr(mod, "flatten_pdf", lambda src, *a, **k: seen.append(src.read_bytes()) or real(src, *a, **k))
+    mod.prepare_pdf(path, lambda _: None)
+    assert seen and all(data == original_bytes for data in seen)  # never the lossy flat copy
+    assert [p.name for p in (tmp_path / ".original").iterdir()] == ["invoice.pdf"]  # no extra backup
+    with pymupdf.open(path) as doc:  # still points at the true original for a further pass
+        assert doc.metadata["keywords"] == f"{mod.ORIGIN_TAG}{mod.file_hash(tmp_path / '.original' / 'invoice.pdf')}"
+
+
 def test_oversized_signed_file_is_not_deleted(tmp_path):
     folder = tmp_path / "in"
     folder.mkdir()

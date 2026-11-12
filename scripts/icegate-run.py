@@ -51,6 +51,7 @@ SIGN_OVERHEAD_PER_PAGE = 13_000  # observed: ~11.5 - 12 kB added per page by DSC
 SAFETY_MARGIN = 64 * 1024  # 64 kB safety buffer below 2 MiB cap
 FLATTEN_DPI = 120  # default dpi for short documents
 FLAT_MARK = "icegate-run flattened"  # a flattened file is not flattened again unless oversized
+ORIGIN_TAG = "source-sha256:"  # in a flat file's keywords: the hash of the document it was made from
 
 # Profiles in descending order of visual quality.
 # Step down DPI and JPEG quality adaptively until the file fits within the safe cap.
@@ -489,15 +490,19 @@ def sb_job(path: Path, kind: str = "SB") -> tuple[str, str] | None:
     return match.group(1), job_date
 
 
-def flatten_pdf(source: Path, target: Path, dpi: int = FLATTEN_DPI, quality: int = 70) -> int:
-    """Rasterise every page to a grayscale JPEG. The portal rejects some Excel exports however they
-    are rewritten (pikepdf, Ghostscript and PyMuPDF rebuilds all failed); a flat copy is accepted."""
+def flatten_pdf(source: Path, target: Path, dpi: int = FLATTEN_DPI, quality: int = 70,
+                origin: str | None = None) -> int:
+    """Rasterise every page to a colour (RGB) JPEG. The portal rejects some Excel exports however they
+    are rewritten (pikepdf, Ghostscript and PyMuPDF rebuilds all failed); a flat copy is accepted.
+    The flat file records the SHA-256 of the document it came from (`origin`, default: `source`), so a
+    later, tighter pass can find that exact original again instead of re-compressing the flat copy."""
     import pymupdf
+    origin = origin or file_hash(source)
     with pymupdf.open(source) as doc, pymupdf.open() as flat:
         for page in doc:
-            image = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY).tobytes("jpeg", jpg_quality=quality)
+            image = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB).tobytes("jpeg", jpg_quality=quality)
             flat.new_page(width=page.rect.width, height=page.rect.height).insert_image(page.rect, stream=image)
-        flat.set_metadata({"producer": FLAT_MARK})
+        flat.set_metadata({"producer": FLAT_MARK, "keywords": f"{ORIGIN_TAG}{origin}"})
         flat.save(target, garbage=4, deflate=True)
     return target.stat().st_size
 
@@ -515,6 +520,17 @@ def keep_original(path: Path) -> Path:
     return kept
 
 
+def original_by_hash(backup: Path, keywords: str) -> Path | None:
+    """The file in FOLDER/.original/ whose SHA-256 a flat file names as its origin, if any."""
+    if not keywords.startswith(ORIGIN_TAG) or not backup.is_dir():
+        return None
+    wanted = keywords[len(ORIGIN_TAG):]
+    for candidate in sorted(backup.iterdir()):
+        if candidate.is_file() and not candidate.is_symlink() and file_hash(candidate) == wanted:
+            return candidate
+    return None
+
+
 def prepare_pdf(path: Path, say: Callable[[str], None]) -> None:
     """Before signing, on every PDF: rasterise the pages (flatten_pdf). That makes any file the portal
     can parse, drops bytes glued on after %%EOF and turns existing signatures into plain page images.
@@ -525,6 +541,7 @@ def prepare_pdf(path: Path, say: Callable[[str], None]) -> None:
         with pymupdf.open(path) as doc:
             pages = len(doc)
             is_flat = doc.metadata.get("producer") == FLAT_MARK
+            keywords = doc.metadata.get("keywords") or ""
     except Exception as exc:
         raise Stop(f"{path.name} cannot be read as a PDF ({exc}); nothing was signed") from None
 
@@ -535,9 +552,16 @@ def prepare_pdf(path: Path, say: Callable[[str], None]) -> None:
     if SIGN_OVERHEAD_PER_PAGE * pages >= PORTAL_FILE_CAP:
         raise Stop(f"{path.name} has {pages} pages; signing overhead alone would exceed the portal's 2 MiB limit")
 
-    # Backup names can belong to an earlier document; never infer a match by name.
-    kept = keep_original(path)
-    source = kept
+    # Backup names can belong to an earlier document; never infer a match by name. A flat file names its
+    # origin by hash, so re-compress that exact original rather than the already-lossy flat copy.
+    origin = None
+    kept = original_by_hash(path.parent / ".original", keywords) if is_flat else None
+    if kept is not None:
+        source, origin = kept, file_hash(kept)
+    else:
+        kept = source = keep_original(path)
+        if is_flat and keywords.startswith(ORIGIN_TAG):
+            origin = keywords[len(ORIGIN_TAG):]  # keep pointing at the true original
 
     effective_cap = max(1, target_cap)
     flat = path.with_name(f".{path.name}.flat")
@@ -546,7 +570,7 @@ def prepare_pdf(path: Path, say: Callable[[str], None]) -> None:
 
     try:
         for dpi, quality in COMPRESSION_PROFILES:
-            size = flatten_pdf(source, flat, dpi=dpi, quality=quality)
+            size = flatten_pdf(source, flat, dpi=dpi, quality=quality, origin=origin)
             best_size = size
             best_profile = (dpi, quality)
             if size <= effective_cap:

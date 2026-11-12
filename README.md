@@ -198,8 +198,8 @@ the upload half run anywhere on files signed elsewhere. The script declares its 
 dependencies (`questionary` for the prompts, `rich` for the tables and spinner, `pymupdf` to flatten PDFs) in a header, so `uv` installs it on first run; the client's
 own dependencies are unchanged. It does this, in order:
 
-1. **Sign.** Each unsigned PDF is first flattened to page images (PyMuPDF, 120 dpi
-   grayscale; old signatures become part of the image, the original goes to
+1. **Sign.** Each unsigned PDF is first flattened to page images (PyMuPDF, 120 dpi colour;
+   old signatures become part of the image, the original goes to
    `FOLDER/.original/`, text is no longer selectable). Unsigned `.pdf`, `.sb` and `.be` files are then signed by running
    `scripts/sign-all.py FOLDER` as a separate program (`--no-sign` skips this). The
    signer alone handles the token and PIN; the script never sees them.
