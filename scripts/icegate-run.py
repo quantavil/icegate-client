@@ -691,7 +691,12 @@ def sb_draft(run: Runner, location: str, jobs: list[tuple[str, str]], wait: floa
                 failures.update(notices([j for j in dict.fromkeys(jobs) if j not in failures]))
             live = [j for j in jobs if j not in failures]
             if not live:
-                raise Stop(f"no {kind} number will be issued: ICEGATE rejected every job")
+                # Notices carry no time: an old rejection of the same job number can sit beside a later
+                # success. The e-copy record is the evidence, so look once before giving up.
+                try:
+                    return build(sb_rows(run, location, list(dict.fromkeys(jobs)), kind))
+                except (NotYet, Stop):
+                    raise Stop(f"no {kind} number will be issued: ICEGATE rejected every job") from None
             try:
                 return build(sb_rows(run, location, live, kind))
             except NotYet as exc:
@@ -803,6 +808,20 @@ def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str =
                      and r.get("docNumber") and r.get("docDate")]
             if match:
                 break
+        if not match and kind == "BE":
+            # A refiled BE keeps the date inside the file but the portal records the new filing date, so a
+            # job-date search misses it. Search from the file's date to today and match location and job only.
+            today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+            out = run(["ecopy", "search", kind, "--from", job_date, "--to", today, "--json"])
+            if out.returncode:
+                raise Stop(f"{kind} search failed: {(out.stderr or out.stdout).strip()[:200]}")
+            try:
+                found = json.loads(out.stdout)
+            except ValueError:
+                raise Stop(f"{kind} search returned invalid JSON") from None
+            match = [r for r in found if str(r.get("jobNumber")) in candidates
+                     and str(r.get("location") or "").casefold() == location.casefold()
+                     and r.get("docNumber") and r.get("docDate")]
         if not match:
             raise NotYet(f"no {kind} found yet for job {number}")
         if len(match) != 1:
