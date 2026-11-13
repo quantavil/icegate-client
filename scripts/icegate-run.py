@@ -469,7 +469,9 @@ def plan_upload(run: Runner, group: str, prefix: list[str], items: list[Item],
 def send_upload(run: Runner, upload: Upload, say: Callable[[str], None]) -> None:
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)  # a half-seen upload must not be interrupted
     try:
-        done = run([*upload.prefix, "--confirm", upload.challenge])
+        # The Done folder is this script's only duplicate guard (Ledger); the client's receipts in the
+        # state directory must not block a file the folder says was not uploaded.
+        done = run([*upload.prefix, "--allow-duplicate", "--confirm", upload.challenge])
     finally:
         signal.signal(signal.SIGINT, previous)
     say((done.stdout + done.stderr).rstrip())
@@ -801,6 +803,16 @@ def copy_html(text: str) -> bool:
         return False
 
 
+def search_records(run: Runner, kind: str, args: list[str]) -> list[dict]:
+    out = run(["ecopy", "search", kind, *args, "--json"])
+    if out.returncode:
+        raise Stop(f"{kind} search failed: {(out.stderr or out.stdout).strip()[:200]}")
+    try:
+        return json.loads(out.stdout)
+    except ValueError:
+        raise Stop(f"{kind} search returned invalid JSON") from None
+
+
 def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str = "SB") -> list[dict]:
     rows = []
     for number, job_date in dict.fromkeys(jobs):
@@ -810,14 +822,8 @@ def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str =
         candidates = [number, f"{number}{job_date[2:4]}"]
         match: list[dict] = []
         for candidate in candidates:
-            out = run(["ecopy", "search", kind, "--location", location, "--job-number", candidate,
-                       "--job-date", job_date, "--json"])
-            if out.returncode:
-                raise Stop(f"{kind} search failed: {(out.stderr or out.stdout).strip()[:200]}")
-            try:
-                found = json.loads(out.stdout)
-            except ValueError:
-                raise Stop(f"{kind} search returned invalid JSON") from None
+            found = search_records(run, kind, ["--location", location, "--job-number", candidate,
+                                               "--job-date", job_date])
             match = [r for r in found if str(r.get("jobNumber")) == candidate
                      and str(r.get("location") or location).casefold() == location.casefold()
                      and (not r.get("jobDate") or portal_date(r["jobDate"]) == expected_date)
@@ -828,13 +834,7 @@ def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str =
             # A refiled BE keeps the date inside the file but the portal records the new filing date, so a
             # job-date search misses it. Search from the file's date to today and match location and job only.
             today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
-            out = run(["ecopy", "search", kind, "--from", job_date, "--to", today, "--json"])
-            if out.returncode:
-                raise Stop(f"{kind} search failed: {(out.stderr or out.stdout).strip()[:200]}")
-            try:
-                found = json.loads(out.stdout)
-            except ValueError:
-                raise Stop(f"{kind} search returned invalid JSON") from None
+            found = search_records(run, kind, ["--from", job_date, "--to", today])
             match = [r for r in found if str(r.get("jobNumber")) in candidates
                      and str(r.get("location") or "").casefold() == location.casefold()
                      and r.get("docNumber") and r.get("docDate")]

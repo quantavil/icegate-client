@@ -116,8 +116,7 @@ class Redactor:
         text = _URL_RE.sub(lambda m: safe_url(m.group(0)), text)
         text = _KEY_VALUE_RE.sub(_key_value, text)
         text = _OPAQUE_RE.sub(_opaque, text)
-        text = _OTP_CONTEXT_RE.sub(lambda m: f"{m.group(1)}{REDACTED}", text)
-        return text
+        return _OTP_CONTEXT_RE.sub(lambda m: f"{m.group(1)}{REDACTED}", text)
 
     def scrub_obj(self, value):
         """Recursively scrub strings inside dicts, lists and tuples."""

@@ -129,6 +129,9 @@ def test_full_run(tmp_path):
     submit = next(c for c in run.calls if c[:2] == ["esanchit", "submit"] and "--confirm" in c)
     assert "--doc-type-map=Packing_list_invoice_1_Signed.pdf=331000" in submit
     assert submit[submit.index("--confirm") + 1] == "SUBMIT 2 0123456789ab"
+    # Done/ is the only duplicate guard; the client's state-dir receipts must not block a confirmed upload.
+    assert all("--allow-duplicate" in c for c in run.calls if "--confirm" in c and c[0] in ("filing", "esanchit"))
+    assert not any("--allow-duplicate" in c for c in run.calls if "--dry-run" in c)
     done = next((folder / "Done").iterdir())
     assert sorted(p.name for p in done.iterdir() if p.name != ".uploaded.json") == sorted([
         "893.sb", "893_Signed.sb", "Packing list invoice 1.pdf", "Packing_list_invoice_1_Signed.pdf",

@@ -260,8 +260,7 @@ and receipt path; a filing 202 is not final, the filing-status email decides.
 - The private signer (`scripts/sign-all.py`) owns the token and PIN. The script runs it as
   a separate program and never reads, prints or logs the PIN.
 - The client owns every portal gate. The script uses `--dry-run`, shows the plan, asks
-  the user once, then passes the printed challenge to `--confirm`. It never adds
-  `--allow-duplicate`, never retries, and records uploaded signed names in each `Done/<run>/.uploaded.json` (no global ledger; deleting a Done run allows a redo).
+  the user once, then passes the printed challenge to `--confirm`. It never retries, passes `--allow-duplicate` on confirm (the client's state-dir receipts are not a guard here), and records uploaded signed names in each `Done/<run>/.uploaded.json` (no global ledger; deleting a Done run allows a redo).
 - **Always flattened before signing (observed 2026-10-30).** The portal can answer `<name> is not a valid PDF file`
   for a structurally fine, validly signed Excel export; rewriting with pikepdf, Ghostscript or PyMuPDF changed
   nothing, but rasterising each page (120 dpi, grayscale JPEG, PyMuPDF) was accepted. Since 2026-11-12 the script rasterises in colour; the portal has not yet been observed accepting a colour flatten. A download with HTML glued

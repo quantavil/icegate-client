@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-from typing import Any
 
 from python_calamine import CalamineError, CalamineWorkbook
 
