@@ -230,17 +230,28 @@ class Prompts:
 
 # ---------------------------------------------------------------- ledger / scan / sign
 class Ledger:
-    """Remember uploaded names and source hashes to detect repeats after re-signing."""
+    """Uploaded names and source hashes come from the folder's own `Done/*/.uploaded.json` files.
 
-    def __init__(self, directory: Path) -> None:
-        self.path = directory / "icegate-run-ledger.json"
+    Nothing global: delete or move a Done run to allow its files to be uploaded again. Only the
+    sign-then-upload resume marker lives in the state directory.
+    """
+
+    def __init__(self, directory: Path, done_dir: Path | None = None) -> None:
         self.pending_path = directory / "icegate-run-pending.json"
-        try:
-            self.entries: dict[str, dict] = json.loads(self.path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            self.entries = {}
-        except (OSError, ValueError):
-            raise Stop(f"cannot read {self.path}") from None
+        self.entries: dict[str, dict] = {}
+        runs = sorted(p for p in done_dir.iterdir() if p.is_dir() and not p.is_symlink()) if done_dir and done_dir.is_dir() else []
+        for run in runs:
+            try:
+                data = json.loads((run / ".uploaded.json").read_text(encoding="utf-8"))
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except (OSError, ValueError):
+                raise Stop(f"cannot read {run / '.uploaded.json'}") from None
+            for key, entry in data.items():
+                previous = self.entries.get(key, {})
+                hashes = [*previous.get("source_hashes", [])]
+                hashes += [h for h in entry.get("source_hashes", []) if h not in hashes]
+                self.entries[key] = {**entry, "source_hashes": hashes}
         try:
             self.pending: dict[str, dict] = json.loads(self.pending_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -286,21 +297,26 @@ class Ledger:
     def seen(self, path: Path) -> dict | None:
         return self.entries.get(path.name.casefold())
 
-    def record(self, items: list[Item], plan_id: str, source_hashes: dict[str, str]) -> None:
+    def record(self, items: list[Item], plan_id: str, source_hashes: dict[str, str], archive: Path) -> None:
         now = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")
+        archive.mkdir(parents=True, exist_ok=True)
+        path = archive / ".uploaded.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            data = {}
         for item in items:
             key = item.signed.name.casefold()
-            previous = self.entries.get(key, {})
-            hashes = previous.get("source_hashes", [])
-            source_hash = source_hashes.get(key)
-            if source_hash and source_hash not in hashes:
-                hashes = [*hashes, source_hash]
-            self.entries[key] = {"plan_id": plan_id, "at": now, "source_hashes": hashes}
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".ledger-")
-        with os.fdopen(fd, "w", encoding="utf-8") as out:
-            json.dump(self.entries, out, indent=1)
-        os.replace(tmp, self.path)
+            hashes = [source_hashes[key]] if source_hashes.get(key) else []
+            data[key] = {"plan_id": plan_id, "at": now, "source_hashes": hashes}
+            self.entries[key] = data[key]
+        fd, tmp = tempfile.mkstemp(dir=archive, prefix=".uploaded-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                json.dump(data, out, indent=1)
+            os.replace(tmp, path)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
 
 
 def portal_safe(name: str) -> str:
@@ -837,7 +853,7 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
     done_dir = folder / "Done"
     if done_dir.exists() and not done_dir.is_dir():
         raise Stop("'Done' exists and is not a folder")
-    ledger = Ledger(state)
+    ledger = Ledger(state, done_dir)
     originals = originals_by_signed_name(folder)
     tidy_names(folder, say, dry_run)
 
@@ -854,10 +870,7 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
                 key = signed_name(path).casefold()
                 previous = ledger.seen(Path(signed_name(path)))
                 if previous and source_hashes[key] in previous.get("source_hashes", []):
-                    raise Stop(f"{path.name} was already uploaded; move it out of this folder")
-                if previous and not previous.get("source_hashes"):
-                    say(f"warning: {path.name} has a previously uploaded name; older ledger entries "
-                        "cannot establish whether its contents were uploaded. Check the portal and mail.")
+                    raise Stop(f"{path.name} was already uploaded (see Done); move it out, or delete its Done run to upload it again")
             for path in todo:
                 if path.suffix.lower() == ".pdf":
                     prepare_pdf(path, say)
@@ -943,7 +956,7 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
     def finish(upload: Upload) -> None:
         """Record the upload, archive its files, then try the draft; never raises for after-work."""
         submitted.append(f"{upload.group} (plan {upload.plan_id})")
-        ledger.record(upload.items, upload.plan_id, source_hashes)
+        ledger.record(upload.items, upload.plan_id, source_hashes, archive)
         try:
             archive.mkdir(parents=True, exist_ok=True)
             for item in upload.items:

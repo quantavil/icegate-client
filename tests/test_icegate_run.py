@@ -130,7 +130,7 @@ def test_full_run(tmp_path):
     assert "--doc-type-map=Packing_list_invoice_1_Signed.pdf=331000" in submit
     assert submit[submit.index("--confirm") + 1] == "SUBMIT 2 0123456789ab"
     done = next((folder / "Done").iterdir())
-    assert sorted(p.name for p in done.iterdir()) == sorted([
+    assert sorted(p.name for p in done.iterdir() if p.name != ".uploaded.json") == sorted([
         "893.sb", "893_Signed.sb", "Packing list invoice 1.pdf", "Packing_list_invoice_1_Signed.pdf",
         "inv two.pdf", "inv_two_Signed.pdf", "draft-esanchit.html", "draft-sb.html"])
     assert "A&amp;B&lt;x&gt;.pdf" not in (done / "draft-esanchit.html").read_text()  # receipt row name is lower-case
@@ -251,7 +251,7 @@ def test_unsigned_originals_are_signed_first_then_uploaded(tmp_path):
     run, said = FakeRun(tmp_path), []
     assert go(folder, tmp_path, run, signer=fake_signer(tmp_path), said=said.append) == 0
     assert any("signing with" in s for s in said)
-    assert sorted(p.name for p in next((folder / "Done").iterdir()).iterdir()) == sorted([
+    assert sorted(p.name for p in next((folder / "Done").iterdir()).iterdir() if p.name != ".uploaded.json") == sorted([
         "Commercial Invoice 1.pdf", "Commercial_Invoice_1_Signed.pdf",
         "Customs invoice 2.pdf", "Customs_invoice_2_Signed.pdf", "draft-esanchit.html"])
 
@@ -507,7 +507,7 @@ def test_signed_file_with_an_unsafe_name_is_renamed_not_resigned_and_uploaded_un
     submit = next(c for c in run.calls if c[:2] == ["esanchit", "submit"] and "--confirm" in c)
     assert "--doc-type-map=INV_PACK_CUSTOM_KB078_Signed.pdf=331000" in submit
     assert not any("&" in a for a in submit)
-    assert sorted(p.name for p in next((folder / "Done").iterdir()).iterdir()) == sorted([
+    assert sorted(p.name for p in next((folder / "Done").iterdir()).iterdir() if p.name != ".uploaded.json") == sorted([
         "INV & PACK CUSTOM KB078.pdf", "INV_PACK_CUSTOM_KB078_Signed.pdf", "draft-esanchit.html"])
 
 

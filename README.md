@@ -203,12 +203,11 @@ own dependencies are unchanged. It does this, in order:
    `FOLDER/.original/`, text is no longer selectable). Unsigned `.pdf`, `.sb` and `.be` files are then signed by running
    `scripts/sign-all.py FOLDER` as a separate program (`--no-sign` skips this). The
    signer alone handles the token and PIN; the script never sees them.
-2. **Pick files.** A checklist of the signed files (all ticked). The ledger in the state
-   directory remembers uploaded names and original-file hashes. A different original
-   with a previously used name can be signed and uploaded; a known identical original
-   is stopped. Previously uploaded signed files without a newly signed original are
-   skipped. Older ledger entries contain names only, so the script warns that their
-   contents cannot be compared; check the portal and email before proceeding.
+2. **Pick files.** A checklist of the signed files (all ticked). Uploaded names and
+   original-file hashes are recorded in each run's `Done/<run>/.uploaded.json`, not in global
+   state. A different original with a previously used name can be signed and uploaded; a known
+   identical original is stopped. To upload a file again on purpose, delete (or move away)
+   the Done run that holds it.
    Signing is isolated to files that need it, so existing signed files are not replaced.
    If a run is cancelled after signing, it can resume while both files remain unchanged;
    if either changes, review and remove the stale signed copy before signing again.
