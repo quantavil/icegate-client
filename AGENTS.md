@@ -107,7 +107,7 @@ Read-only reports (observed 2026-10-30, live-tested):
   and "`generated with BE/SB number N`" carry the document number, not the job. Job numbers repeat, so
   `icegate-run.py` judges a job only by notices that appear after its baseline taken before the upload.
   A rejected or failed job ends the wait for its SB/BE number; BE numbers come from `ecopy search BE` by job
-  (`docDate` can be `-`). A BE job keeps the date in the file; a refiled BE can carry a different job date.
+  (`docDate` can be `-`). The e-copy job date is the day ICEGATE processed the file, not the date inside it, so `icegate-run.py` finds SB and BE records with one date-range search from the file date to today, matching location and job number (the e-copy number can carry a two-digit year suffix).
 - Gatepass (SB35) is an e-copy kind: `documentType: "LEOGate"` on the same
   `searchByDate`/`searchByJobNumber` calls; CLI kind `GATEPASS`. The list holds the
   same bills as SB; records without `irn`/`userId` have no gatepass yet. Download is

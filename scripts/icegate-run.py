@@ -155,20 +155,25 @@ def candidates(stem: str, known: dict[str, str]) -> tuple[list[str], bool]:
     return (pick(terms) if terms else []), False
 
 
+DEFAULT_CODE = "331000"  # commercial invoice including packing list: the code for a file whose name says nothing
+
+
 def assign_codes(items: list[Item], ui: Prompts | None, known: dict[str, str]) -> None:
     """Every PDF gets a code. With a terminal the user picks per file, the guess pre-selected;
-    without one, only a code the catalogue pins to a single entry is used, otherwise stop."""
+    without one, only a code the catalogue pins to a single entry is used. When the name does not
+    point to a code, DEFAULT_CODE is used (and pre-selected at a terminal)."""
     previous: dict[tuple[str, ...], str] = {}
     for item in items:
         options, sure = candidates(item.label, known)
+        fallback = DEFAULT_CODE if DEFAULT_CODE in known else None
         if ui is None:
-            if not sure:
+            if not sure and not fallback:
                 hint = f" (could be: {', '.join(options[:6])})" if options else ""
                 raise Stop(f"cannot tell the document code for {item.signed.name}{hint}")
-            item.code = options[0]
+            item.code = options[0] if sure else fallback
             continue
         key = tuple(options)
-        default = options[0] if sure else previous.get(key) or (options[0] if options else None)
+        default = options[0] if sure else previous.get(key) or (options[0] if options else fallback)
         code = ui.choose_code(item.signed.name, options, known, default)
         if code not in known:
             raise Stop(f"{item.signed.name}: unknown or missing document code {code!r}")
@@ -765,6 +770,7 @@ def notice_watcher(run: Runner, location: str, jobs: list[tuple[str, str]],
             for event in reversed(matching[:max(0, len(matching) - seen[job])]):  # new ones, oldest first
                 text = f"ICEGATE, job {job[0]}: {event['message']}"
                 if event["outcome"] == "submitted":
+                    failed.pop(job, None)  # a later acceptance supersedes an earlier rejection (a refile)
                     if text not in told:
                         told.add(text)
                         say(text)
@@ -803,41 +809,60 @@ def copy_html(text: str) -> bool:
         return False
 
 
-def search_records(run: Runner, kind: str, args: list[str]) -> list[dict]:
-    out = run(["ecopy", "search", kind, *args, "--json"])
+def _portal_day(value: object) -> date | None:
+    """A portal date (DD-MM-YYYY, or the UTC timestamps `portal_date` reads) as a date; None if unreadable."""
+    try:
+        return datetime.strptime(portal_date(value), "%d-%m-%Y").date()
+    except (Stop, ValueError):
+        return None
+
+
+def _registered(row: dict, kind: str) -> bool:
+    """The record carries its number; a BE may carry '-' as its date, an SB needs a real one."""
+    has = lambda key: str(row.get(key) or "").strip() not in {"", "-", "0"}  # noqa: E731
+    return has("docNumber") and (kind == "BE" or has("docDate"))
+
+
+def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str = "SB",
+            today: date | None = None) -> list[dict]:
+    """The registered SB/BE records for these (job number, job date in the file) pairs.
+
+    The portal's own job date is the day ICEGATE processed the file, not the date written in it (observed:
+    file 20261113, e-copy 14-11-2026; BE file 20261109, e-copy 13-11-2026), so a search by the file's date
+    finds nothing. One date-range search from the earliest file date to today covers every possible
+    processing day; each job is then matched on location and number, within that window.
+    """
+    unique = list(dict.fromkeys(jobs))
+    starts = {job: date.fromisoformat(job[1]) for job in unique}
+    first = min(starts.values())
+    last = max([today or datetime.now(ZoneInfo("Asia/Kolkata")).date(), *starts.values()])
+    out = run(["ecopy", "search", kind, "--from", first.isoformat(), "--to", last.isoformat(), "--json"])
     if out.returncode:
         raise Stop(f"{kind} search failed: {(out.stderr or out.stdout).strip()[:200]}")
     try:
-        return json.loads(out.stdout)
+        found = json.loads(out.stdout)
     except ValueError:
         raise Stop(f"{kind} search returned invalid JSON") from None
+    if not isinstance(found, list):
+        raise Stop(f"{kind} search returned an unexpected response")
 
+    def in_window(row: dict, start: date) -> bool:
+        if not row.get("jobDate"):
+            return True
+        day = _portal_day(row["jobDate"])
+        return day is not None and start <= day <= last
 
-def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str = "SB") -> list[dict]:
     rows = []
-    for number, job_date in dict.fromkeys(jobs):
-        expected_date = date.fromisoformat(job_date).strftime("%d-%m-%Y")
+    for job in unique:
+        number, start = job[0], starts[job]
         # The record's job number (what the portal's notices use) can be the e-copy job number minus a
         # two-digit year suffix (record 642, e-copy 64226), so try the plain number, then the suffixed one.
-        candidates = [number, f"{number}{job_date[2:4]}"]
-        match: list[dict] = []
-        for candidate in candidates:
-            found = search_records(run, kind, ["--location", location, "--job-number", candidate,
-                                               "--job-date", job_date])
-            match = [r for r in found if str(r.get("jobNumber")) == candidate
+        for candidate in (number, f"{number}{job[1][2:4]}"):
+            match = [r for r in found if isinstance(r, dict) and str(r.get("jobNumber")) == candidate
                      and str(r.get("location") or location).casefold() == location.casefold()
-                     and (not r.get("jobDate") or portal_date(r["jobDate"]) == expected_date)
-                     and r.get("docNumber") and r.get("docDate")]
+                     and in_window(r, start) and _registered(r, kind)]
             if match:
                 break
-        if not match and kind == "BE":
-            # A refiled BE keeps the date inside the file but the portal records the new filing date, so a
-            # job-date search misses it. Search from the file's date to today and match location and job only.
-            today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
-            found = search_records(run, kind, ["--from", job_date, "--to", today])
-            match = [r for r in found if str(r.get("jobNumber")) in candidates
-                     and str(r.get("location") or "").casefold() == location.casefold()
-                     and r.get("docNumber") and r.get("docDate")]
         if not match:
             raise NotYet(f"no {kind} found yet for job {number}")
         if len(match) != 1:
@@ -1058,6 +1083,9 @@ def recheck(folder: Path, *, run: Runner, say: Callable[[str], None], wait: floa
             body = sb_draft(run, location, jobs, wait, pause_plain(say), kind=kind, failures=failed,
                             notices=notice_watcher(run, location, jobs, say, []))
             path.write_text(body, encoding="utf-8")
+        except NotYet as exc:
+            say(f"{kind} table unavailable: {exc}. ICEGATE has accepted the filing for processing, but the "
+                f"{kind} number only appears once it is registered; run this recheck again later.")
         except (Stop, OSError, ValueError) as exc:
             say(f"{kind} table unavailable: {exc}")
         for (number, _), message in failed.items():

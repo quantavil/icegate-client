@@ -2,6 +2,7 @@ import importlib.machinery
 import importlib.util
 import json
 import sys
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -184,8 +185,8 @@ def test_no_terminal_needs_yes(tmp_path):
     with pytest.raises(mod.Stop, match="--yes"):
         go(folder, tmp_path, FakeRun(tmp_path), ui=None)
     assert len(list(folder.iterdir())) == 2
-    with pytest.raises(mod.Stop, match="cannot tell"):          # no terminal: ambiguous names cannot be decided
-        go(make(tmp_path / "x", "INV 1.pdf"), tmp_path, FakeRun(tmp_path), ui=None, yes=True)
+    # no terminal and a name that does not pin one code: the default code is used, never a stop
+    assert go(make(tmp_path / "x", "INV 1.pdf"), tmp_path, FakeRun(tmp_path), ui=None, yes=True) == 0
     folder2 = make(tmp_path / "y", "Commercial Invoice 2.pdf")
     assert go(folder2, tmp_path, FakeRun(tmp_path), ui=None, yes=True) == 0
 
@@ -245,8 +246,11 @@ def test_codes_are_chosen_per_file_with_the_last_answer_as_default(tmp_path):
     odd = mod.Item(tmp_path / "PARAMOUNT_114_Signed.pdf")
     with pytest.raises(mod.Stop, match="unknown"):
         mod.assign_codes([odd], FakeUI("ZZZ"), mod.catalog())
-    with pytest.raises(mod.Stop, match="cannot tell"):
-        mod.assign_codes([odd], None, mod.catalog())
+    mod.assign_codes([odd], None, mod.catalog())              # no terminal, name says nothing: default code
+    assert odd.code == mod.DEFAULT_CODE == "331000"
+    seen = FakeUI("331000")
+    mod.assign_codes([mod.Item(tmp_path / "PARAMOUNT_115_Signed.pdf")], seen, mod.catalog())
+    assert seen.defaults[0] == "331000"                       # at a terminal it is pre-selected
 
 
 def test_unsigned_originals_are_signed_first_then_uploaded(tmp_path):
@@ -302,17 +306,47 @@ def test_sb_job_is_read_from_file_when_filename_is_not_job_number(tmp_path):
     assert (next((folder / "Done").iterdir()) / "draft-sb.html").exists()
 
 
-def test_sb_lookup_uses_job_date_and_rejects_incomplete_results(tmp_path):
+def test_sb_lookup_searches_the_range_and_rejects_incomplete_results(tmp_path):
     run = FakeRun(tmp_path, rows=[{**SB_ROW, "docNumber": ""}])
     with pytest.raises(mod.NotYet):
-        mod.sb_rows(run, "INMBD6", [("893", "2026-10-30")])
-    assert "--job-date" in run.calls[0] and "2026-10-30" in run.calls[0]
+        mod.sb_rows(run, "INMBD6", [("893", "2026-10-30")], today=date(2026, 11, 2))
+    assert run.calls[0][2:] == ["SB", "--from", "2026-10-30", "--to", "2026-11-02", "--json"]
+    for dash in ({"docDate": "-"}, {"docDate": ""}, {"docNumber": "-"}):
+        with pytest.raises(mod.NotYet):
+            mod.sb_rows(FakeRun(tmp_path, rows=[{**SB_ROW, **dash}]), "INMBD6", [("893", "2026-10-30")])
 
 
-def test_sb_lookup_rejects_wrong_job_date(tmp_path):
+def test_sb_lookup_rejects_a_job_dated_before_the_file(tmp_path):
     run = FakeRun(tmp_path, rows=[{**SB_ROW, "jobDate": "29-10-2026"}])
     with pytest.raises(mod.NotYet):
         mod.sb_rows(run, "INMBD6", [("893", "2026-10-30")])
+
+
+def test_sb_lookup_finds_a_job_the_portal_dated_after_the_file(tmp_path):
+    """File says 2026-11-13; ICEGATE processed it on the 14th and dates the e-copy job that day."""
+    row = {**SB_ROW, "jobNumber": "788", "jobDate": "14-11-2026", "docDate": "14-11-2026"}
+    run = FakeRun(tmp_path, rows=[row, {**row, "jobNumber": "789"}])
+    assert mod.sb_rows(run, "INMBD6", [("788", "2026-11-13")], today=date(2026, 11, 16)) == [row]
+    assert len(run.calls) == 1  # one search for every job, not one per job and date
+
+
+def test_sb_lookup_ignores_other_locations_and_future_dates(tmp_path):
+    other = {**SB_ROW, "location": "INSTT6"}
+    later = {**SB_ROW, "jobDate": "20-11-2026"}
+    with pytest.raises(mod.NotYet):
+        mod.sb_rows(FakeRun(tmp_path, rows=[other, later]), "INMBD6", [("893", "2026-11-10")], today=date(2026, 11, 16))
+
+
+def test_be_lookup_accepts_a_dash_date_and_a_later_job_date(tmp_path):
+    row = {**BE_ROW, "jobDate": "09-11-2026"}
+    assert mod.sb_rows(FakeRun(tmp_path, rows=[row]), "INHDD6", [("113", "2026-11-05")], "BE",
+                       today=date(2026, 11, 16)) == [row]
+
+
+def test_sb_lookup_two_matches_is_ambiguous(tmp_path):
+    run = FakeRun(tmp_path, rows=[SB_ROW, {**SB_ROW, "docNumber": "8176056"}])
+    with pytest.raises(mod.Stop, match="multiple"):
+        mod.sb_rows(run, "INMBD6", [("893", "2026-10-28")], today=date(2026, 10, 28))
 
 
 def test_recheck_recovers_sb_table_from_archived_file_without_upload(tmp_path, monkeypatch):
@@ -447,9 +481,6 @@ class LateSB(FakeRun):
 
     def __call__(self, argv):
         if argv[:2] == ["ecopy", "search"]:
-            if argv[argv.index("--job-number") + 1] != SB_ROW["jobNumber"]:  # year-suffixed fallback search
-                self.rows = []
-                return super().__call__(argv)
             self.searches += 1
             self.rows = [SB_ROW] if self.searches >= 3 else []
         return super().__call__(argv)
@@ -462,7 +493,7 @@ def test_sb_number_found_under_year_suffixed_job_number(tmp_path):
     class Suffixed(FakeRun):
         def __call__(self, argv):
             if argv[:2] == ["ecopy", "search"]:
-                self.rows = [row] if argv[argv.index("--job-number") + 1] == "89326" else []
+                self.rows = [row]
             return super().__call__(argv)
 
     folder = make(tmp_path, "893.sb")
@@ -853,7 +884,7 @@ def test_be_number_is_looked_up_after_a_be_upload(tmp_path):
     run, said = FakeRun(tmp_path, rows=[BE_ROW]), []
     assert go(folder, tmp_path, run, said=said.append) == 0
     search = next(c for c in run.calls if c[:2] == ["ecopy", "search"])
-    assert search[2:] == ["BE", "--location", "INHDD6", "--job-number", "113", "--job-date", "2026-11-05", "--json"]
+    assert search[2:4] == ["BE", "--from"] and search[4] == "2026-11-05" and search[-1] == "--json"
     draft = (next((folder / "Done").iterdir()) / "draft-be.html").read_text()
     assert "4941305" in draft and "BE Number" in draft and "SB Number" not in draft
 
