@@ -39,8 +39,10 @@ def isolated(tmp_path, monkeypatch):
 class FakeRun:
     """Stands in for the client; every argv must parse with the client's real parser."""
 
-    def __init__(self, tmp_path, fail=None, fail_filing=False, rows=None, before=(), after=(), unreadable=0):
+    def __init__(self, tmp_path, fail=None, fail_filing=False, rows=None, before=(), after=(), unreadable=0,
+                 filing_exit=1):
         self.calls, self.fail, self.fail_filing, self.rows, self.tmp = [], fail, fail_filing, rows, tmp_path
+        self.filing_exit = filing_exit
         self.before, self.after, self.polled, self.unreadable = list(before), list(after), 0, unreadable
 
     def __call__(self, argv):
@@ -56,7 +58,7 @@ class FakeRun:
         if argv[:2] == ["filing", "upload"]:
             if "--confirm" not in argv:
                 return ok("challenge   FILE 1 abcdefabcdef\n")
-            return ok("", 1, "error: portal said no\n") if self.fail_filing else ok("accepted\n")
+            return ok("", self.filing_exit, "error: portal said no\n") if self.fail_filing else ok("accepted\n")
         if argv[0] == "notifications":
             self.polled += 1  # the first call is the baseline taken before uploading
             if self.polled <= self.unreadable:
@@ -117,7 +119,7 @@ def fake_signer(tmp_path, code=0):
 
 def go(folder, tmp_path, run, **kw):
     kw.setdefault("ui", FakeUI())
-    return mod.run_folder(folder, run=run, say=kw.pop("said", lambda _: None), state=tmp_path / "state", **kw)
+    return mod.run_folder(folder, run=run, say=kw.pop("said", lambda _: None), **kw)
 
 
 def test_full_run(tmp_path):
@@ -156,6 +158,69 @@ def test_unknown_outcome_stops_and_says_do_not_rerun(tmp_path):
     folder = make(tmp_path, "Commercial Invoice 1.pdf")
     with pytest.raises(mod.Stop, match="do NOT re-run"):
         go(folder, tmp_path, FakeRun(tmp_path, fail=3))
+
+
+@pytest.mark.parametrize("kind,exit_code", [("esanchit", 3), ("filing", 3), ("filing", 2), ("esanchit", 130)])
+def test_unknown_outcome_is_remembered_in_done_and_blocks_a_rerun(tmp_path, kind, exit_code):
+    name = "Commercial Invoice 1.pdf" if kind == "esanchit" else "893.sb"
+    folder = make(tmp_path, name)
+    run = FakeRun(tmp_path, fail=exit_code) if kind == "esanchit" else FakeRun(tmp_path, fail_filing=True, filing_exit=exit_code)
+    with pytest.raises(mod.Stop, match="marked in"):
+        go(folder, tmp_path, run)
+    signed = next(p for p in folder.iterdir() if p.name.endswith(("_Signed.pdf", "_Signed.sb")))
+    (record,) = (folder / "Done").iterdir()
+    entry = json.loads((record / ".uploaded.json").read_text())[signed.name.casefold()]
+    assert entry["status"] == "unknown" and signed.exists()                  # the file stays where it is
+    said, again = [], FakeRun(tmp_path)
+    with pytest.raises(mod.Stop, match="no new"):
+        go(folder, tmp_path, again, said=said.append)
+    assert any("outcome unknown" in s and record.name in s for s in said)
+    assert not any("--confirm" in c for c in again.calls)                    # nothing was sent
+    import shutil
+    shutil.rmtree(folder / "Done")                                           # deleting Done wipes the memory
+    assert go(folder, tmp_path, FakeRun(tmp_path)) == 0
+
+
+def test_refusal_before_dispatch_is_not_remembered(tmp_path):
+    folder = make(tmp_path, "893.sb")
+    with pytest.raises(mod.Stop, match="upload stopped"):
+        go(folder, tmp_path, FakeRun(tmp_path, fail_filing=True, filing_exit=1))
+    assert not (folder / "Done").exists()
+    assert go(folder, tmp_path, FakeRun(tmp_path)) == 0                      # no false positive: it can be retried
+
+
+def test_unknown_filing_after_good_esanchit_keeps_both_records_apart(tmp_path):
+    folder = make(tmp_path, "Commercial Invoice 1.pdf", "893.sb")
+    with pytest.raises(mod.Stop, match="Already submitted in this run: eSANCHIT"):
+        go(folder, tmp_path, FakeRun(tmp_path, fail_filing=True, filing_exit=3))
+    (record,) = (folder / "Done").iterdir()
+    entries = json.loads((record / ".uploaded.json").read_text())
+    assert entries["commercial_invoice_1_signed.pdf"].get("status") is None
+    assert entries["893_signed.sb"]["status"] == "unknown"
+    assert sorted(p.name for p in folder.iterdir() if p.is_file()) == ["893.sb", "893_Signed.sb"]
+
+
+def test_pending_marker_lives_in_done_and_is_gone_after_upload(tmp_path):
+    folder = make(tmp_path, "Commercial Invoice 1.pdf", signed=False)
+    with pytest.raises(mod.Stop, match="not confirmed"):
+        go(folder, tmp_path, FakeRun(tmp_path), signer=fake_signer(tmp_path), ui=FakeUI(confirm=False))
+    assert (folder / "Done" / ".pending.json").exists()
+    assert not (tmp_path / "state").exists()                                 # nothing outside the folder
+    assert go(folder, tmp_path, FakeRun(tmp_path), signer=fake_signer(tmp_path)) == 0
+    assert not (folder / "Done" / ".pending.json").exists()
+    assert [p.is_dir() for p in (folder / "Done").iterdir()] == [True]
+
+
+def test_deleting_done_also_forgets_the_pending_marker(tmp_path):
+    import shutil
+    folder = make(tmp_path, "Commercial Invoice 1.pdf", signed=False)
+    with pytest.raises(mod.Stop, match="not confirmed"):
+        go(folder, tmp_path, FakeRun(tmp_path), signer=fake_signer(tmp_path), ui=FakeUI(confirm=False))
+    shutil.rmtree(folder / "Done")
+    (folder / "Commercial_Invoice_1_Signed.pdf").write_text("signed by hand, different bytes")
+    run = FakeRun(tmp_path)
+    assert go(folder, tmp_path, run, signer=fake_signer(tmp_path)) == 0      # no stale "changed since signing"
+    assert any("--confirm" in call for call in run.calls)
 
 
 def test_filing_failure_after_esanchit_success_keeps_state_straight(tmp_path):

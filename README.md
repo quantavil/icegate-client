@@ -204,12 +204,17 @@ own dependencies are unchanged. It does this, in order:
    `scripts/sign-all.py FOLDER` as a separate program (`--no-sign` skips this). The
    signer alone handles the token and PIN; the script never sees them.
 2. **Pick files.** A checklist of the signed files (all ticked). Uploaded names and
-   original-file hashes are recorded in each run's `Done/<run>/.uploaded.json`, not in global
-   state. A different original with a previously used name can be signed and uploaded; a known
-   identical original is stopped. To upload a file again on purpose, delete (or move away)
-   the Done run that holds it.
+   original-file hashes are recorded in each run's `Done/<run>/.uploaded.json`; the `Done`
+   folder is the only memory, with nothing in global state. A different original with a
+   previously used name can be signed and uploaded; a known identical original is stopped.
+   An upload whose outcome is unknown (client exit 2, 3 or 130) is recorded there too, with
+   `"status": "unknown"`, and its files stay in the folder: check the portal and mail, then
+   delete that Done run to allow another upload. A refusal before anything was sent (exit 1)
+   records nothing. To upload a file again on purpose, delete the Done run that holds it;
+   deleting `Done` forgets everything.
    Signing is isolated to files that need it, so existing signed files are not replaced.
-   If a run is cancelled after signing, it can resume while both files remain unchanged;
+   If a run is cancelled after signing, it can resume while both files remain unchanged
+   (the marker is `Done/.pending.json`, dropped once the files are recorded);
    if either changes, review and remove the stale signed copy before signing again.
 3. **Pick the document type per PDF.** A searchable list of every code in
    `document_codes.txt`, with the best guess from the file name pre-selected, so Enter

@@ -85,6 +85,10 @@ class NotYet(Stop):
     """The portal has not registered the SB number yet."""
 
 
+class Unsure(Stop):
+    """An upload may have reached the portal; the caller records it in Done before stopping."""
+
+
 POLL_SECONDS = 30  # each check is a fresh client login, so do not hammer the portal
 
 
@@ -234,17 +238,29 @@ class Prompts:
 
 
 # ---------------------------------------------------------------- ledger / scan / sign
-class Ledger:
-    """Uploaded names and source hashes come from the folder's own `Done/*/.uploaded.json` files.
+def write_json_atomic(path: Path, data: object) -> None:
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(data, out, indent=1)
+        os.replace(tmp, path)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
-    Nothing global: delete or move a Done run to allow its files to be uploaded again. Only the
-    sign-then-upload resume marker lives in the state directory.
+
+class Ledger:
+    """The folder's `Done` directory is the only memory of what was uploaded.
+
+    Uploaded names and source hashes come from `Done/*/.uploaded.json`; an entry with
+    `"status": "unknown"` is an upload whose outcome could not be confirmed (its files stay in the
+    folder). The sign-then-upload resume marker is `Done/.pending.json`. Nothing lives anywhere else:
+    delete a Done run to allow its files to be uploaded again, delete `Done` to forget everything.
     """
 
-    def __init__(self, directory: Path, done_dir: Path | None = None) -> None:
-        self.pending_path = directory / "icegate-run-pending.json"
+    def __init__(self, done_dir: Path) -> None:
+        self.pending_path = done_dir / ".pending.json"
         self.entries: dict[str, dict] = {}
-        runs = sorted(p for p in done_dir.iterdir() if p.is_dir() and not p.is_symlink()) if done_dir and done_dir.is_dir() else []
+        runs = sorted(p for p in done_dir.iterdir() if p.is_dir() and not p.is_symlink()) if done_dir.is_dir() else []
         for run in runs:
             try:
                 data = json.loads((run / ".uploaded.json").read_text(encoding="utf-8"))
@@ -256,7 +272,7 @@ class Ledger:
                 previous = self.entries.get(key, {})
                 hashes = [*previous.get("source_hashes", [])]
                 hashes += [h for h in entry.get("source_hashes", []) if h not in hashes]
-                self.entries[key] = {**entry, "source_hashes": hashes}
+                self.entries[key] = {**entry, "source_hashes": hashes, "run": run.name}
         try:
             self.pending: dict[str, dict] = json.loads(self.pending_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -272,14 +288,18 @@ class Ledger:
                 "original": str(path.resolve()), "source_hash": source_hashes[key],
                 "prepared_hash": file_hash(path), "signed_hash": file_hash(signed),
             }
-        self.pending_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, tmp = tempfile.mkstemp(dir=self.pending_path.parent, prefix=".pending-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as out:
-                json.dump(self.pending, out, indent=1)
-            os.replace(tmp, self.pending_path)
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        self.pending_path.parent.mkdir(exist_ok=True)
+        write_json_atomic(self.pending_path, self.pending)
+
+    def forget_pending(self, signed: list[Path]) -> None:
+        """Drop resume markers once the files are recorded, so no stale marker outlives its upload."""
+        dropped = [self.pending.pop(str(path.resolve()), None) for path in signed]  # a list: drop every one
+        if not any(dropped):
+            return
+        if self.pending:
+            write_json_atomic(self.pending_path, self.pending)
+        else:
+            self.pending_path.unlink(missing_ok=True)
 
     def resumable(self, folder: Path, originals: dict[str, Path], source_hashes: dict[str, str]) -> set[str]:
         result: set[str] = set()
@@ -302,7 +322,9 @@ class Ledger:
     def seen(self, path: Path) -> dict | None:
         return self.entries.get(path.name.casefold())
 
-    def record(self, items: list[Item], plan_id: str, source_hashes: dict[str, str], archive: Path) -> None:
+    def record(self, items: list[Item], plan_id: str, source_hashes: dict[str, str], archive: Path,
+               status: str | None = None) -> None:
+        """Write the items into `archive/.uploaded.json`; `status="unknown"` marks an unconfirmed upload."""
         now = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")
         archive.mkdir(parents=True, exist_ok=True)
         path = archive / ".uploaded.json"
@@ -313,15 +335,10 @@ class Ledger:
         for item in items:
             key = item.signed.name.casefold()
             hashes = [source_hashes[key]] if source_hashes.get(key) else []
-            data[key] = {"plan_id": plan_id, "at": now, "source_hashes": hashes}
-            self.entries[key] = data[key]
-        fd, tmp = tempfile.mkstemp(dir=archive, prefix=".uploaded-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as out:
-                json.dump(data, out, indent=1)
-            os.replace(tmp, path)
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+            data[key] = {"plan_id": plan_id, "at": now, "source_hashes": hashes, **({"status": status} if status else {})}
+            self.entries[key] = {**data[key], "run": archive.name}
+        write_json_atomic(path, data)
+        self.forget_pending([item.signed for item in items])
 
 
 def portal_safe(name: str) -> str:
@@ -429,8 +446,10 @@ def scan(folder: Path, ledger: Ledger, say: Callable[[str], None],
             if signed_name(path) not in {q.name for q in files} | {portal_safe(q.name) for q in files}:
                 say(f"skipping {path.name} (not signed; sign it first)")
         elif (done := ledger.seen(path)) is not None and path.name.casefold() not in (newly_signed or set()):
-            say(f"skipping {path.name}: already uploaded (plan {done['plan_id']}, {done['at']}); "
-                "do not upload it again, move it out of this folder")
+            what = ("upload outcome unknown; check the portal and mail first" if done.get("status") == "unknown"
+                    else "already uploaded; do not upload it again")
+            say(f"skipping {path.name}: {what} (plan {done['plan_id']}, {done['at']}, Done/{done['run']}); "
+                "delete that Done run only to allow another upload")
         else:
             (pdfs if suffix == ".pdf" else filings).append(Item(path, originals.get(path.name)))
     return pdfs, filings
@@ -480,9 +499,9 @@ def send_upload(run: Runner, upload: Upload, say: Callable[[str], None]) -> None
     finally:
         signal.signal(signal.SIGINT, previous)
     say((done.stdout + done.stderr).rstrip())
-    if done.returncode in (2, 3):
-        raise Stop(f"{upload.group} outcome is unknown (exit {done.returncode}); do NOT re-run. "
-                   f"Check the portal and mail. Plan id {upload.plan_id}")
+    if done.returncode not in (0, 1):  # exit 1 is a refusal before anything was sent; the rest may have been
+        raise Unsure(f"{upload.group} outcome is unknown (exit {done.returncode}); do NOT re-run. "
+                     f"Check the portal and mail. Plan id {upload.plan_id}")
     if done.returncode:
         raise Stop(f"{upload.group} upload stopped (exit {done.returncode}); read the message above "
                    f"before trying again. Plan id {upload.plan_id}")
@@ -873,12 +892,12 @@ def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str =
 
 # ---------------------------------------------------------------- the run
 def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
-               ui: Prompts | None, dry_run: bool = False, yes: bool = False, state: Path = STATE,
+               ui: Prompts | None, dry_run: bool = False, yes: bool = False,
                signer: Path | None = None, wait: float = 0) -> int:
     done_dir = folder / "Done"
     if done_dir.exists() and not done_dir.is_dir():
         raise Stop("'Done' exists and is not a folder")
-    ledger = Ledger(state, done_dir)
+    ledger = Ledger(done_dir)
     originals = originals_by_signed_name(folder)
     tidy_names(folder, say, dry_run)
 
@@ -895,7 +914,8 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
                 key = signed_name(path).casefold()
                 previous = ledger.seen(Path(signed_name(path)))
                 if previous and source_hashes[key] in previous.get("source_hashes", []):
-                    raise Stop(f"{path.name} was already uploaded (see Done); move it out, or delete its Done run to upload it again")
+                    raise Stop(f"{path.name} was already uploaded or its outcome is unknown (Done/{previous['run']}); "
+                               "delete that Done run to upload it again")
             for path in todo:
                 if path.suffix.lower() == ".pdf":
                     prepare_pdf(path, say)
@@ -1012,12 +1032,22 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
                 else f"could not copy the {name} table; open {drafts[name]} in a browser, copy and paste")
 
     def wrap_up() -> None:
-        if archive.exists():
+        if archive.exists() and any(p.name != ".uploaded.json" for p in archive.iterdir()):
             say(f"files and drafts are in {archive}; delete that folder when you are done")
 
     try:
         for upload in uploads:
-            send_upload(run, upload, say)
+            try:
+                send_upload(run, upload, say)
+            except Unsure as exc:
+                # Done is the only memory: mark these files so no later run sends them again unseen.
+                try:
+                    ledger.record(upload.items, upload.plan_id, source_hashes, archive, status="unknown")
+                except OSError as err:
+                    raise Stop(f"{exc}\nWARNING: could not record this in {archive} ({err.strerror}); "
+                               "move the files out of this folder yourself") from None
+                raise Stop(f"{exc}\nThe files stay in this folder and are marked in {archive}; "
+                           "delete that Done run only after checking, to allow another upload") from None
             finish(upload)
             if upload.group == "eSANCHIT":
                 draft("esanchit", esanchit_draft, upload.receipt or STATE / "receipts" / f"{upload.plan_id}.json", known)
