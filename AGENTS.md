@@ -160,6 +160,14 @@ Read-only reports (observed 2026-10-30, live-tested):
   document type.
 - Staged rows are session-scoped. A new handoff (new `JSESSIONID`/`tabId`)
   renders an empty queue, so stage and submit must share one process.
+- Observed 2026-11-18: `uploadDocs` answered HTTP 200 with a fixed 247-byte body,
+  no redirect and no staging table, for four attempts. The body is the web
+  firewall's block page: `Request Rejected … Your support ID is: <digits>`. The
+  same bytes were accepted at 12:06 in a 5-file batch that redirected to
+  `/esanchit/home`, so the block is not decided by the file alone. The client stops
+  with no dispatch and raises "web firewall rejected" with the support ID; the journal
+  records it as `stage_error_body` with `kind: firewall`. Do not work around the
+  firewall; wait and quote the support ID to ICEGATE if it persists.
 - Submit: `POST /esanchit/submitDocs` must be the browser's whole form:
   multipart with an empty `docs` part, `tabId`, `finalSubmit` (empty), and per
   row `fileName`, `drn`, `irn` (empty) and `docTyp` set to the full option

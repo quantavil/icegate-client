@@ -12,12 +12,13 @@ allowlist and its own confirmation gate.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 from ..shared.errors import HandoffError, StagingError
 from ..shared.journal import Journal
-from ..shared.redact import query_keys, remember
+from ..shared.redact import query_keys, remember, scrub
 from ..shared.session import IcegateSession
 from .page import HomePage
 
@@ -26,6 +27,7 @@ FORM_ACTION_ALLOWLIST = frozenset({"uploadDocs"})
 
 MAX_HOPS = 6
 HOME_PATH = "/esanchit/home"
+_FIREWALL_REJECT_RE = re.compile(r"Request Rejected.*?support ID is:\s*(\d+)", re.IGNORECASE)
 
 
 def assert_action_allowed(
@@ -168,6 +170,33 @@ class EsanchitClient:
             raise StagingError(f"upload returned HTTP {response.status_code}")
         if result.errors:
             raise StagingError("; ".join(result.errors)[:500])
+        if not result.rows:
+            # A bare page with no staging table (observed 2026-11-18: HTTP 200,
+            # 247 bytes, no redirect). Nothing was staged. The usual body is the
+            # web firewall's "Request Rejected" page, which carries a support ID.
+            text = " ".join((response.text or "").split())
+            excerpt = scrub(text[:600])
+            firewall = _FIREWALL_REJECT_RE.search(text)
+            self.journal.add(
+                "stage_error_body",
+                status=response.status_code,
+                bytes=len(response.content),
+                kind="firewall" if firewall else "other",
+                excerpt=excerpt,
+            )
+            if firewall:
+                raise StagingError(
+                    "eSANCHIT's web firewall rejected the upload ('Request Rejected', "
+                    f"support ID {firewall.group(1)}). This is the portal's block page, "
+                    "not a file or staging error; nothing was staged or submitted. Wait "
+                    "before retrying, since every run logs in and hands off again. If it "
+                    "keeps happening, quote the support ID to ICEGATE."
+                )
+            raise StagingError(
+                f"eSANCHIT answered the upload with HTTP {response.status_code}, "
+                f"{len(response.content)} bytes and no staging table ({excerpt!r}); "
+                "nothing was staged or submitted"
+            )
         return result
 
     # ----------------------------------------------------------------- posts

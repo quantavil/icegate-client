@@ -169,6 +169,27 @@ def test_stage_surfaces_page_errors(client, session, signed_pdf):
         client.stage([signed_pdf], page=HomePage.parse(EMPTY_HOME_HTML))
 
 
+def test_stage_without_staging_table_reports_the_portal_body(client, session, signed_pdf):
+    session._install([FakeResponse(200, text="<html><body>Session expired, log in again</body></html>")])
+    with pytest.raises(StagingError, match="no staging table") as info:
+        client.stage([signed_pdf], page=HomePage.parse(EMPTY_HOME_HTML))
+    assert "Session expired" in str(info.value)
+    assert "nothing was staged or submitted" in str(info.value)
+
+
+def test_stage_reports_firewall_block_with_support_id(client, session, signed_pdf):
+    body = (
+        "<html><head><title>Request Rejected</title></head><body>The requested URL was "
+        "rejected. Please consult with your administrator.<br><br>Your support ID is: "
+        "10000000000000000001<br><br><a href='javascript:history.back();'>[Go Back]</a></body></html>"
+    )
+    session._install([FakeResponse(200, text=body)])
+    with pytest.raises(StagingError, match="web firewall rejected") as info:
+        client.stage([signed_pdf], page=HomePage.parse(EMPTY_HOME_HTML))
+    assert "10000000000000000001" in str(info.value)
+    assert "nothing was staged or submitted" in str(info.value)
+
+
 def test_stage_follows_redirect_and_upgrades_to_https(client, session, signed_pdf):
     session._install(
         [
