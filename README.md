@@ -124,9 +124,11 @@ download answering 409 means the portal is still retrieving an older document;
 retry in about an hour. Gatepass records without an `irn` have no gatepass yet.
 
 `notifications` reads the dashboard bell (read-only; it never marks anything read). Plain, it
-prints the raw list; with `--events` it prints only filing outcomes, newest first, as JSON
-(`outcome` is `submitted`, `rejected` or `failed`, with `job`, `date`, `location` and `detail`).
-`submitted` means accepted for processing, not final. Notifications have a date but no time.
+prints a formatted table of messages; with `--events` it prints filing outcomes (newest first,
+with `outcome`, `doc`, `job`, `date`, `location` and `detail`). Add `--days <N>` to filter within
+the last N days (e.g. `--days 1` for today, `--days 2` for today and yesterday, `--days 7`, `--days 30`).
+Add `--json` for machine-readable JSON. `submitted` means accepted for processing, not final.
+Notifications have a date but no time.
 
 `report job-status` prints the portal's latest ~200 Shipping Bills (no date
 filter), `my-iec` lists your IEC clients, and `enquiry sb` reads the public
@@ -176,16 +178,41 @@ provide a timezone), independent of the computer’s timezone.
 Workflow commands accept `--json`, `--env-file`, `--state-dir`,
 `--no-journal` and `-v`.
 
-## One command: sign, pick, confirm, upload
+## Fast Customs Operations with `icerun`
 
 ```bash
-upload "FILE_PATH"                         # Linux/macOS, if the upload command is installed
-scripts/icegate-run.py "FILE_PATH"          # Linux/macOS
-uv run scripts/icegate-run.py "FILE_PATH"   # Windows (no shebang)
-scripts\upload.cmd "FILE_PATH"              # Windows launcher
+icerun "FILE_PATH"                         # Linux/macOS
+scripts/icegate-run.py "FILE_PATH"         # Direct script
+uv run scripts/icegate-run.py "FILE_PATH"  # Windows
+scripts\upload.cmd "FILE_PATH"             # Windows launcher
 ```
 
-Replace `FILE_PATH` with the path to your folder containing the files. The folder can be anywhere.
+Replace `FILE_PATH` with the path to your folder containing the files. The folder can be anywhere. Note: `upload` remains available as an alias for `icerun`.
+
+### Core Daily Commands
+
+1. **Filing & Signing a Folder:**
+   ```bash
+   icerun /path/to/folder            # Signs, uploads, tracks SB/BE, copies table to clipboard
+   icerun /path/to/folder --dry-run  # Preview files and codes without signing or uploading
+   ```
+
+2. **Viewing Past Run History:**
+   ```bash
+   icerun history /path/to/folder    # Merges all completed runs and copies combined table to clipboard
+   icerun history /path/to/folder --select  # Interactively pick a specific past run (alias: --ls)
+   ```
+
+3. **Live ICEGATE Status Checks:**
+   ```bash
+   icerun check                      # Recent dashboard notifications (default: 30 days)
+   icerun check --days 2             # Notifications from last 2 days
+   icerun check sb --days 1          # Today's Shipping Bills from customs portal
+   icerun check sb --days 7          # Last 7 days of Shipping Bills
+   icerun check be --days 30         # Last 30 days of Bills of Entry
+   ```
+
+---
 
 A personal workflow around the client, not part of it. Both scripts are plain Python and
 system-neutral. The signer is separate: on Linux `icegate-sign` finds the vendor
@@ -246,8 +273,10 @@ for a missing SB or BE number. An existing saved table is displayed without a ne
 
 To choose a recent completed run interactively, use `upload "FILE_PATH" --ls`.
 Here `FILE_PATH` is the working folder or its `Done` folder. The picker lists runs
-newest first with their file names; selecting one rechecks it and copies the table.
-Use `--table sb`, `--table be` or `--table esanchit` to select which table to copy.
+newest first with their file names (or "Show all completed runs combined" to view and copy all);
+selecting one rechecks it and copies the table.
+Use `upload "FILE_PATH" --all` to show and copy all completed runs combined into one table without selecting interactively.
+Use `--table sb`, `--table be` or `--table esanchit` to filter which table to copy.
 
 For an `.sb` or `.be` file the customs location is read from the file itself (the first field of its
 `<TABLE>SB` or `<TABLE>BE` record); there is no option for it. If the files name different locations or none can be read, the run stops before anything is sent. The SB lookup also uses the job number and date in that record, regardless of the filename. A BE file whose location or job cannot be read is still uploaded, but gets no BE-number check. `--dry-run` lists signed and unsigned files and guessed codes without signing or uploading. If a run

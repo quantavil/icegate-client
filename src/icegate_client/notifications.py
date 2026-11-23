@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .shared.errors import IcegateError
 from .shared.session import IcegateSession
@@ -82,12 +83,14 @@ def parse_notification(message: str) -> dict[str, Any] | None:
     if match := _VALIDATION.search(message):
         stage, job, day, location = match.groups()
         extra = message.split("Errors:", 1)[1].strip() if "Errors:" in message else ""
-        return {"outcome": "failed", "doc": None, "job": job, "number": None, "date": _iso(day), "location": location.upper(),
+        doc = "SB" if "cache" in message.lower() or "shipping bill" in message.lower() else ("BE" if "cachi" in message.lower() or "bill of entry" in message.lower() else None)
+        return {"outcome": "failed", "doc": doc, "job": job, "number": None, "date": _iso(day), "location": location.upper(),
                 "detail": f"{stage.lower()} validation failed" + (f": {' '.join(extra.split())[:300]}" if extra else ""),
                 "message": text}
     if match := _PROCESSING.search(message):
         job, day, location = match.groups()
-        return {"outcome": "failed", "doc": None, "job": job, "number": None, "date": _iso(day), "location": location.upper(),
+        doc = "SB" if "cache" in message.lower() or "shipping bill" in message.lower() else ("BE" if "cachi" in message.lower() or "bill of entry" in message.lower() else None)
+        return {"outcome": "failed", "doc": doc, "job": job, "number": None, "date": _iso(day), "location": location.upper(),
                 "detail": "portal error while processing the file; check the portal before retrying", "message": text}
     return None
 
@@ -101,3 +104,98 @@ def filing_events(notifications: Any) -> list[dict[str, Any]]:
         if isinstance(item, dict) and isinstance(item.get("message"), str) and (event := parse_notification(item["message"])):
             events.append({**event, "created": item.get("createdDate")})
     return events
+
+
+def parse_date(val: Any) -> date | None:
+    """Parse a date string in common ICEGATE or ISO formats."""
+    if isinstance(val, date) and not isinstance(val, datetime):
+        return val
+    if isinstance(val, datetime):
+        return val.date()
+    if not isinstance(val, str) or not val.strip():
+        return None
+    val = val.strip()
+    if "T" in val or " " in val:
+        val = val.replace("T", " ").split()[0]
+    for fmt in ("%d.%m.%Y", "%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%Y%m%d", "%d%m%Y"):
+        try:
+            parsed = datetime.strptime(val, fmt).date()
+            if parsed.year >= 2000:
+                return parsed
+        except ValueError:
+            continue
+    return None
+
+
+def filter_by_days(
+    items: list[dict[str, Any]],
+    days: int = 30,
+    *,
+    is_events: bool = False,
+    now: date | None = None,
+    doc: str | None = None,
+) -> list[dict[str, Any]]:
+    """Filter notifications to those within the last N days (maximum 30 days window).
+
+    `days=1` means today.
+    `days=2` means today and yesterday.
+    `days=7` means the last 7 calendar days.
+    `days=30` (or default) covers up to 30 calendar days.
+    `doc` filters by document type ('SB' or 'BE').
+    Dates are evaluated in the Asia/Kolkata timezone unless `now` is provided.
+    """
+    if now is None:
+        try:
+            now = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+        except Exception:
+            now = datetime.now().date()
+
+    requested_days = max(1, min(days, 30))
+    cutoff = now - timedelta(days=requested_days - 1)
+    target_doc = doc.upper().strip() if isinstance(doc, str) else None
+    if target_doc in ("ALL", ""):
+        target_doc = None
+
+    filtered = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_date = None
+        if is_events:
+            item_date = parse_date(item.get("created")) or parse_date(item.get("date"))
+        else:
+            for key in ("createdDate", "created_date", "created", "date"):
+                if key in item and (d := parse_date(item[key])):
+                    item_date = d
+                    break
+
+        if item_date is not None:
+            # Within window [cutoff, now + 1 day for clock skew tolerance]
+            if not (cutoff <= item_date <= now + timedelta(days=1)):
+                continue
+        elif requested_days < 30:
+            continue
+
+        # Document type filter (SB or BE)
+        if target_doc:
+            if is_events:
+                item_doc = item.get("doc")
+                if not item_doc:
+                    msg = str(item.get("message") or "").lower()
+                    if "shipping bill" in msg or "cache" in msg or any(k in msg for k in ("sb no", "sb number", "sb#", "sb/", "sb:")):
+                        item_doc = "SB"
+                    elif "bill of entry" in msg or "cachi" in msg or any(k in msg for k in ("be no", "be number", "be#", "be/", "be:")):
+                        item_doc = "BE"
+                if item_doc != target_doc:
+                    continue
+            else:
+                msg = str(item.get("message") or "").lower()
+                if target_doc == "SB" and not any(k in msg for k in ("shipping bill", "cache", "sb no", "sb number", "sb#", "sb/", "sb:")):
+                    continue
+                if target_doc == "BE" and not any(k in msg for k in ("bill of entry", "cachi", "be no", "be number", "be#", "be/", "be:")):
+                    continue
+
+        filtered.append(item)
+
+    return filtered
+

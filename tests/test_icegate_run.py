@@ -511,6 +511,116 @@ def test_invalid_wait_stops_before_processing(tmp_path, wait, capsys):
     assert "--wait" in capsys.readouterr().err
 
 
+def test_icerun_check_command(tmp_path, monkeypatch, capsys):
+    calls = []
+    def fake_client_runner():
+        def run(argv):
+            calls.append(argv)
+            return type("Res", (), {"returncode": 0, "stdout": "NOTICES_TABLE\n", "stderr": ""})()
+        return run
+    monkeypatch.setattr(mod, "client_runner", fake_client_runner)
+
+    # 1. icerun check (defaults to notifications 30 days)
+    res = mod.main(["check"])
+    assert res == 0
+    assert calls[-1] == ["notifications", "--days", "30", "--events"]
+    assert "NOTICES_TABLE" in capsys.readouterr().out
+
+    # 2. icerun check --days 2
+    res = mod.main(["check", "--days", "2"])
+    assert res == 0
+    assert calls[-1] == ["notifications", "--days", "2", "--events"]
+
+    # 3. icerun check notifications --days 2
+    res = mod.main(["check", "notifications", "--days", "2"])
+    assert res == 0
+    assert calls[-1] == ["notifications", "--days", "2", "--events"]
+
+    # 4. icerun check sb (defaults to today)
+    res = mod.main(["check", "sb"])
+    assert res == 0
+    assert calls[-1] == ["ecopy", "sb", "--today"]
+
+    # 5. icerun check sb --days 7
+    res = mod.main(["check", "sb", "--days", "7"])
+    assert res == 0
+    assert calls[-1] == ["ecopy", "sb", "--week"]
+
+    # 6. icerun check be --days 30
+    res = mod.main(["check", "be", "--days", "30"])
+    assert res == 0
+    assert calls[-1] == ["ecopy", "be", "--month"]
+
+    # 7. Backward compatibility: upload --notifications --table sb --days 2
+    res = mod.main(["--notifications", "--table", "sb", "--days", "2"])
+    assert res == 0
+    assert calls[-1] == ["notifications", "--days", "2", "--events", "--doc", "SB"]
+
+    # 8. Backward compatibility: upload FOLDER --notifications --sb
+    res = mod.main([str(tmp_path), "--notifications", "--sb"])
+    assert res == 0
+    assert calls[-1] == ["notifications", "--days", "30", "--events", "--doc", "SB"]
+
+    # 9. Backward compatibility: upload --sb --week
+    res = mod.main(["--sb", "--week"])
+    assert res == 0
+    assert calls[-1] == ["ecopy", "sb", "--week"]
+
+    # 10. icerun check notifications --sb (GOLDFISH-2 fix)
+    res = mod.main(["check", "notifications", "--sb"])
+    assert res == 0
+    assert calls[-1] == ["notifications", "--days", "30", "--events", "--doc", "SB"]
+
+    # 11. Conflicting --sb and --be (GOLDFISH-6 fix)
+    res = mod.main(["check", "--sb", "--be"])
+    assert res == 1
+    assert "cannot specify both --sb and --be" in capsys.readouterr().err
+
+    # 12. Safety: check flags with folder must NOT trigger upload (GOLDFISH-1 fix)
+    folder = tmp_path / "job_folder"
+    folder.mkdir()
+    res = mod.main([str(folder), "--sb"])
+    assert res == 1
+    assert "check options" in capsys.readouterr().err
+
+    # 13. Safety: unexpected positional argument with folder (GOLDFISH-1 fix)
+    res = mod.main([str(folder), "typo_arg"])
+    assert res == 1
+    assert "unexpected argument: 'typo_arg'" in capsys.readouterr().err
+
+
+def test_icerun_history_combines_multiple_runs(tmp_path, capsys):
+    done = tmp_path / "Done"
+    run1 = done / "20261106-210414-972337"
+    run2 = done / "20261106-210750-330102"
+    for r, job, num in ((run1, "101", "80001"), (run2, "102", "80002")):
+        r.mkdir(parents=True)
+        html_content = mod.sb_html([{"jobNumber": job, "docNumber": num, "docDate": "2026-11-23T00:00:00.000Z"}])
+        (r / "draft-sb.html").write_text(html_content)
+
+    # 1. icerun history FOLDER
+    res = mod.main(["history", str(tmp_path)])
+    assert res == 0
+    out = capsys.readouterr().out
+    assert "101" in out and "80001" in out
+    assert "102" in out and "80002" in out
+    assert "2 row(s)" in out
+
+    # 2. icerun FOLDER --history
+    res = mod.main([str(tmp_path), "--history"])
+    assert res == 0
+    out = capsys.readouterr().out
+    assert "101" in out and "80001" in out
+    assert "2 row(s)" in out
+
+    # 3. Legacy: upload FOLDER --all
+    res = mod.main([str(tmp_path), "--all"])
+    assert res == 0
+    out = capsys.readouterr().out
+    assert "101" in out and "80001" in out
+
+
+
 def test_validation_warnings_are_shown_before_upload_confirmation(tmp_path):
     class WarningRun(FakeRun):
         def __call__(self, argv):

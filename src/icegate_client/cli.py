@@ -20,7 +20,7 @@ from .ecopy import ECopyCache, ECopyClient
 from .enquiry import EnquiryClient
 from .jobstatus import JobStatusClient
 from .myiec import MyIecClient
-from .notifications import NotificationClient, filing_events
+from .notifications import NotificationClient, filing_events, filter_by_days
 from .esanchit.client import EsanchitClient
 from .esanchit.doc_types import DocumentCatalog
 from .esanchit.page import StagedRow, split_option
@@ -593,13 +593,27 @@ def cmd_submit(ctx: Context, _args: argparse.Namespace | None = None) -> int:
 
 def cmd_ecopy_search(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     args = ctx.args
-    if args.relative_date:
+    rel_days = getattr(args, "relative_days", None)
+    if args.relative_date or rel_days is not None:
         if args.start_date is not None or args.end_date is not None:
             raise IcegateError("relative date flags cannot be combined with --from or --to")
+        if rel_days is not None and rel_days < 1:
+            raise IcegateError("--days must be at least 1")
         selected = datetime.now(ZoneInfo("Asia/Kolkata")).date()
         if args.relative_date == "yesterday":
             selected -= timedelta(days=1)
-        args.start_date = args.end_date = selected
+            args.start_date = args.end_date = selected
+        elif args.relative_date == "week":
+            args.start_date = selected - timedelta(days=6)
+            args.end_date = selected
+        elif args.relative_date == "month":
+            args.start_date = selected - timedelta(days=29)
+            args.end_date = selected
+        elif rel_days is not None:
+            args.start_date = selected - timedelta(days=max(rel_days - 1, 0))
+            args.end_date = selected
+        else:
+            args.start_date = args.end_date = selected
     date_search = args.start_date is not None or args.end_date is not None
     job_search = any(value is not None for value in (args.location, args.job_number, args.job_date))
     if date_search == job_search:
@@ -644,7 +658,63 @@ def cmd_report_job_status(ctx: Context, _args: argparse.Namespace | None = None)
 def cmd_notifications(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     ctx.authenticate()
     body = NotificationClient(ctx.session).list(ctx.args.type)
-    print(_json(filing_events(body) if ctx.args.events else body, indent=2))
+    if getattr(ctx.args, "days", None) is not None:
+        if ctx.args.days < 1:
+            raise IcegateError("--days must be at least 1")
+        days = ctx.args.days
+    elif getattr(ctx.args, "time_preset", None) is not None:
+        days = ctx.args.time_preset
+    else:
+        days = 30
+
+    if getattr(ctx.args, "sb", False) and getattr(ctx.args, "be", False):
+        raise IcegateError("cannot specify both --sb and --be")
+
+    doc = None
+    if getattr(ctx.args, "sb", False):
+        doc = "SB"
+    elif getattr(ctx.args, "be", False):
+        doc = "BE"
+    elif getattr(ctx.args, "doc", "all") and ctx.args.doc.lower() != "all":
+        doc = ctx.args.doc.upper()
+    if ctx.args.events:
+        events = filing_events(body)
+        records = filter_by_days(events, days=days, is_events=True, doc=doc)
+        if ctx.args.json:
+            print(_json(records, indent=2))
+        elif records:
+            headers = ["Date", "Doc", "Outcome", "Job/No", "Location", "Detail"]
+            rows = [
+                [
+                    str(r.get("created") or r.get("date") or "-"),
+                    str(r.get("doc") or "-"),
+                    str(r.get("outcome") or "-"),
+                    str(r.get("job") or r.get("number") or "-"),
+                    str(r.get("location") or "-"),
+                    str(r.get("detail") or " ".join(str(r.get("message") or "-").split()))[:80],
+                ]
+                for r in records
+            ]
+            _say(_table(headers, rows))
+        else:
+            _say("no records found")
+    else:
+        raw_items = body if isinstance(body, list) else []
+        records = filter_by_days(raw_items, days=days, is_events=False, doc=doc)
+        if ctx.args.json:
+            print(_json(records if isinstance(body, list) else body, indent=2))
+        elif records:
+            headers = ["Date", "Message"]
+            rows = [
+                [
+                    str(r.get("createdDate") or r.get("created") or r.get("date") or "-"),
+                    " ".join(str(r.get("message") or "-").split()),
+                ]
+                for r in records
+            ]
+            _say(_table(headers, rows))
+        else:
+            _say("no records found")
     return 0
 
 
@@ -921,8 +991,19 @@ def build_parser() -> argparse.ArgumentParser:
     my_iec.add_argument("--location", help="only this customs location code")
     my_iec.set_defaults(func=cmd_my_iec)
 
-    notifications = sub.add_parser("notifications", parents=[common], help="dashboard notifications (read-only, JSON)")
+    notifications = sub.add_parser("notifications", parents=[common], help="dashboard notifications (read-only)")
     notifications.add_argument("--type", default="E", help="notification type (default E)")
+    notifications.add_argument("--days", type=int, help="filter notifications within the last N days (e.g. --days 2)")
+    notifications.add_argument("--today", "--day", dest="time_preset", action="store_const", const=1,
+                               help="notifications from today only (1 day)")
+    notifications.add_argument("--week", dest="time_preset", action="store_const", const=7,
+                               help="notifications from the last 7 days (1 week)")
+    notifications.add_argument("--month", dest="time_preset", action="store_const", const=30,
+                               help="notifications from the last 30 days (1 month, default)")
+    notifications.add_argument("--doc", choices=("all", "sb", "be", "SB", "BE"), default="all",
+                               help="filter by document type (SB or BE)")
+    notifications.add_argument("--sb", action="store_true", help="show only Shipping Bill notifications")
+    notifications.add_argument("--be", action="store_true", help="show only Bill of Entry notifications")
     notifications.add_argument("--events", action="store_true",
                                help="only filing outcomes (submitted, rejected, validation failed), newest first")
     notifications.set_defaults(func=cmd_notifications)
@@ -943,6 +1024,9 @@ def build_parser() -> argparse.ArgumentParser:
         relative = search.add_mutually_exclusive_group()
         relative.add_argument("--today", dest="relative_date", action="store_const", const="today", help="search today's date in India")
         relative.add_argument("--yesterday", "--yestarday", dest="relative_date", action="store_const", const="yesterday", help="search yesterday's date in India")
+        relative.add_argument("--week", dest="relative_date", action="store_const", const="week", help="search the last 7 days in India")
+        relative.add_argument("--month", dest="relative_date", action="store_const", const="month", help="search the last 30 days in India")
+        relative.add_argument("--days", dest="relative_days", type=int, help="search the last N days in India")
         search.add_argument("--location", help="customs location code for a job search")
         search.add_argument("--job-number", help="job number for a job search")
         search.add_argument("--job-date", type=_date_arg, help="job date, YYYY-MM-DD")

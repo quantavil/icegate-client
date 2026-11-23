@@ -211,8 +211,8 @@ class Prompts:
     def confirm(self, text: str) -> bool:
         return self._answer(self.q.confirm(text, default=False))
 
-    def choose_run(self, runs: list[Path]) -> Path:
-        choices = []
+    def choose_run(self, runs: list[Path]) -> Path | str:
+        choices = [self.q.Choice("Show all completed runs combined", value="ALL")]
         for path in runs:
             files = sorted(p.name for p in path.iterdir() if p.is_file()
                            and p.suffix.lower() in {".pdf", *FILING_SUFFIXES}
@@ -753,7 +753,7 @@ def sb_draft(run: Runner, location: str, jobs: list[tuple[str, str]], wait: floa
 
 def portal_events(run: Runner) -> list[dict] | None:
     """Filing outcomes from the portal's notifications, newest first; None when they cannot be read."""
-    out = run(["notifications", "--events"])
+    out = run(["notifications", "--events", "--json"])
     if out.returncode:
         return None
     try:
@@ -1140,38 +1140,270 @@ def recheck(folder: Path, *, run: Runner, say: Callable[[str], None], wait: floa
     return 0
 
 
+def extract_table_rows(html_text: str) -> tuple[list[str], list[list[str]]]:
+    """Extract headers and data rows from an HTML table block."""
+    headers: list[str] = []
+    rows: list[list[str]] = []
+    for block in re.findall(r"<table.*?</table>", html_text, re.S):
+        for tr in re.findall(r"<tr>(.*?)</tr>", block, re.S):
+            ths = [html.unescape(c.strip()) for c in re.findall(r"<th>(.*?)</th>", tr, re.S)]
+            if ths and not headers:
+                headers = ths
+            tds = [html.unescape(c.strip()) for c in re.findall(r"<td>(.*?)</td>", tr, re.S)]
+            if tds and tds not in rows:
+                rows.append(tds)
+    return headers, rows
+
+
+def recheck_all(runs: list[Path], *, say: Callable[[str], None], table_name: str = "all") -> int:
+    """Combine and show saved tables from all completed runs without selecting just one."""
+    names = ("esanchit", "sb", "be") if table_name == "all" else (table_name,)
+    copied_any = False
+    for name in names:
+        all_rows: list[list[str]] = []
+        headers: list[str] = []
+        for archive in runs:
+            path = archive / f"draft-{name}.html"
+            if not path.is_file():
+                continue
+            h, r = extract_table_rows(path.read_text(encoding="utf-8"))
+            if h and not headers:
+                headers = h
+            for row in r:
+                if row not in all_rows:
+                    all_rows.append(row)
+        if all_rows and headers:
+            intro = "Find below the IRN and DRN details:" if name == "esanchit" else f"Find below {name.upper()} Numbers:"
+            combined_html = page(intro, [table(headers, all_rows)])
+            say(f"\nCombined {name.upper()} table ({len(all_rows)} row(s) from {len(runs)} completed run(s)):\n{plain_table(combined_html)}")
+            if copy_html(combined_html):
+                copied_any = True
+                copied_last = True
+            else:
+                copied_any = True
+                copied_last = False
+    if not copied_any:
+        raise Stop(f"no saved {table_name.upper()} tables found across completed runs")
+    say("-" * 60)
+    if copied_last:
+        say("Combined table copied to clipboard.")
+    else:
+        say("Could not copy the combined table to clipboard.")
+    if len(names) > 1:
+        say("The clipboard holds the last table shown. Use --table esanchit, sb or be to copy one specifically.")
+    return 0
+
+
+def show_notifications(*, run: Runner, say: Callable[[str], None], days: int = 30,
+                       table_name: str = "all", sb: bool = False, be: bool = False,
+                       raw: bool = False, as_json: bool = False) -> int:
+    if table_name == "esanchit":
+        raise Stop("notifications only track SB and BE filings, not eSANCHIT")
+    argv = ["notifications", "--days", str(days)]
+    if not raw:
+        argv.append("--events")
+    doc = "SB" if sb or table_name == "sb" else ("BE" if be or table_name == "be" else None)
+    if doc:
+        argv.extend(["--doc", doc])
+    if as_json:
+        argv.append("--json")
+    out = run(argv)
+    if out.stdout:
+        say(out.stdout.rstrip())
+    if out.stderr:
+        print(out.stderr.rstrip(), file=sys.stderr, flush=True)
+    return out.returncode
+
+
+def parse_days_value(val: str | int | None, default: int) -> int:
+    if val is None:
+        return default
+    if isinstance(val, int):
+        return val
+    s = str(val).strip().lower()
+    if s in ("today", "day", "1"):
+        return 1
+    if s in ("week", "7"):
+        return 7
+    if s in ("month", "30"):
+        return 30
+    try:
+        n = int(s)
+        if n < 1:
+            raise Stop("--days must be at least 1")
+        return n
+    except ValueError:
+        raise Stop(f"invalid --days value: {val!r}; expected number of days (e.g. --days 2) or 'today', 'week', 'month'")
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sign a folder, pick types, confirm, upload, draft and archive.")
-    parser.add_argument("folder", help="folder holding the files to process")
+    parser = argparse.ArgumentParser(
+        prog="icerun",
+        description="Sign, upload, and track customs filings, review run history, and check ICEGATE portal status.",
+    )
+    parser.add_argument("folder_or_command", nargs="?", default=None,
+                        help="folder to process, or command ('check', 'history')")
+    parser.add_argument("sub_target", nargs="?", default=None,
+                        help="target for check ('notifications', 'sb', 'be') or folder for 'history'")
     parser.add_argument("--dry-run", action="store_true", help="show files and guessed codes only; sign and upload nothing")
     parser.add_argument("--yes", action="store_true", help="skip the upload confirmation (required when not on a terminal)")
     parser.add_argument("--no-sign", action="store_true", help="do not run the signer; use only files already signed")
+
     history_mode = parser.add_mutually_exclusive_group()
-    history_mode.add_argument("--recheck", action="store_true", help="show tables from the specified completed run without uploading")
-    history_mode.add_argument("--ls", action="store_true", help="pick a completed run from this folder's Done history and recheck it")
-    parser.add_argument("--table", choices=("all", "esanchit", "sb", "be"), default="all", help="table to show and copy with --recheck")
+    history_mode.add_argument("--history", action="store_true",
+                              help="show completed runs and copy summary table to clipboard (default: combines all runs)")
+    history_mode.add_argument("--select", "--ls", dest="select", action="store_true",
+                              help="pick a completed run from history instead of combining all")
+    history_mode.add_argument("--all", action="store_true",
+                              help="combine and show tables from all completed runs (same as --history)")
+    history_mode.add_argument("--recheck", action="store_true",
+                              help="show tables from a specific completed run without uploading")
+    history_mode.add_argument("--notifications", "--notices", action="store_true",
+                              help="show ICEGATE notifications without uploading")
+
+    parser.add_argument("--table", choices=("all", "esanchit", "sb", "be"), default="all",
+                        help="table to show and copy with history, or document type filter")
+    parser.add_argument("--days", type=str, default=None,
+                        help="filter by days (e.g. --days 2, --days 7, or 'today', 'week', 'month')")
+    parser.add_argument("--today", "--day", dest="time_preset", action="store_const", const=1,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--week", dest="time_preset", action="store_const", const=7,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--month", dest="time_preset", action="store_const", const=30,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--raw", action="store_true",
+                        help="show raw notification list instead of parsed filing events")
+    parser.add_argument("--sb", action="store_true", help="check Shipping Bills")
+    parser.add_argument("--be", action="store_true", help="check Bills of Entry")
+    parser.add_argument("--json", action="store_true", help="machine-readable JSON output")
     parser.add_argument("--wait", type=float, default=None, metavar="SECONDS",
-                        help="wait for SB numbers (default: 600 seconds for upload, 0 for recheck)")
+                        help="wait for SB numbers (default: 600 seconds for upload, 0 for history)")
     parser.add_argument("--signer", default=os.environ.get("ICEGATE_SIGN_SCRIPT") or Path(__file__).resolve().with_name("sign-all.py"))
     args = parser.parse_args(argv)
     say = lambda text: print(text, flush=True)  # noqa: E731
     try:
+        first = (args.folder_or_command or "").strip()
+        second = (args.sub_target or "").strip()
+        cmd_lower = first.lower()
+
+        # 1. CHECK ROUTE
+        is_notices_explicit = args.notifications or (cmd_lower in ("notifications", "notices"))
+        is_check_cmd = (cmd_lower == "check")
+        is_portal_shortcut = (args.sb or args.be) and not is_notices_explicit and not first
+
+        is_check = is_check_cmd or is_notices_explicit or is_portal_shortcut
+        if is_check:
+            if args.dry_run or args.no_sign or args.yes:
+                raise Stop("check commands cannot be combined with --dry-run, --no-sign or --yes")
+
+            target = "notifications"
+            sub_lower = second.lower()
+            if is_check_cmd:
+                if sub_lower in ("sb", "shipping-bill", "shipping-bills"):
+                    target = "sb"
+                elif sub_lower in ("be", "bill-of-entry", "bills-of-entry"):
+                    target = "be"
+                elif sub_lower in ("notifications", "notices"):
+                    target = "notifications"
+                elif not sub_lower:
+                    if args.sb and args.be:
+                        raise Stop("cannot specify both --sb and --be")
+                    target = "sb" if args.sb else ("be" if args.be else "notifications")
+                else:
+                    raise Stop(f"unknown check target: {second!r}; expected 'notifications', 'sb', or 'be'")
+            elif is_notices_explicit:
+                if args.sb and args.be:
+                    raise Stop("cannot specify both --sb and --be")
+                target = "notifications"
+            elif is_portal_shortcut:
+                if args.sb and args.be:
+                    raise Stop("cannot specify both --sb and --be")
+                target = "sb" if args.sb else "be"
+
+            if args.days is not None:
+                days = parse_days_value(args.days, default=30 if target == "notifications" else 1)
+            elif args.time_preset is not None:
+                days = args.time_preset
+            else:
+                days = 30 if target == "notifications" else 1
+
+            if target == "notifications":
+                return show_notifications(
+                    run=client_runner(),
+                    say=say,
+                    days=days,
+                    table_name=args.table,
+                    sb=args.sb,
+                    be=args.be,
+                    raw=args.raw,
+                    as_json=args.json,
+                )
+            else:
+                argv = ["ecopy", target]
+                if days == 1:
+                    argv.append("--today")
+                elif days == 7:
+                    argv.append("--week")
+                elif days == 30:
+                    argv.append("--month")
+                else:
+                    argv.extend(["--days", str(days)])
+                if args.json:
+                    argv.append("--json")
+                out = client_runner()(argv)
+                if out.stdout:
+                    say(out.stdout.rstrip())
+                if out.stderr:
+                    print(out.stderr.rstrip(), file=sys.stderr, flush=True)
+                return out.returncode
+
+        # 2. HISTORY ROUTE
+        is_history = (cmd_lower == "history") or args.history or args.select or args.all or args.recheck
+        if is_history:
+            if args.dry_run or args.no_sign or args.yes:
+                raise Stop("history commands cannot be combined with --dry-run, --no-sign or --yes")
+            folder_str = second if cmd_lower == "history" else first
+            if not folder_str:
+                raise Stop("history requires a folder path (e.g. icerun history /path/to/folder)")
+            folder = Path(folder_str).expanduser().resolve()
+            if not folder.is_dir():
+                raise Stop("folder not found")
+
+            if args.select:
+                if not sys.stdin.isatty():
+                    raise Stop("--select/--ls needs an interactive terminal; use without --select to show all")
+                chosen = Prompts().choose_run(completed_runs(folder))
+                if chosen == "ALL":
+                    return recheck_all(completed_runs(folder), say=say, table_name=args.table)
+                folder = chosen
+                return recheck(folder, run=client_runner(), say=say,
+                               wait=args.wait if args.wait is not None else 0, table_name=args.table)
+
+            is_direct_run = not (folder / "Done").is_dir() and (
+                any(folder.glob("draft-*.html")) or bool(re.fullmatch(r"\d{8}-\d{6}-\d{6}", folder.name))
+            )
+            if is_direct_run or args.recheck:
+                return recheck(folder, run=client_runner(), say=say,
+                               wait=args.wait if args.wait is not None else 0, table_name=args.table)
+
+            return recheck_all(completed_runs(folder), say=say, table_name=args.table)
+
+        # 3. FILING / UPLOAD ROUTE
+        folder_str = second if cmd_lower == "file" else first
+        if not folder_str:
+            parser.print_help()
+            return 1
+        if cmd_lower != "file" and second:
+            raise Stop(f"unexpected argument: {second!r}")
+        if args.sb or args.be or args.notifications or args.days is not None or args.time_preset is not None or args.raw or args.json:
+            raise Stop("check options (--sb, --be, --days, --today, --week, --month, --raw, --json) cannot be used when filing a folder")
         if args.wait is not None and (not math.isfinite(args.wait) or args.wait < 0):
             raise Stop("--wait must be a finite number of seconds, zero or greater")
-        folder = Path(args.folder).expanduser().resolve()
+        folder = Path(folder_str).expanduser().resolve()
         if not folder.is_dir():
             raise Stop("folder not found")
-        if args.recheck or args.ls:
-            if args.dry_run or args.no_sign or args.yes:
-                raise Stop("--recheck/--ls cannot be combined with --dry-run, --no-sign or --yes")
-            if args.ls:
-                if not sys.stdin.isatty():
-                    raise Stop("--ls needs an interactive terminal; use FILE_PATH --recheck to select a run directly")
-                folder = Prompts().choose_run(completed_runs(folder))
-            return recheck(folder, run=client_runner(), say=say,
-                           wait=args.wait if args.wait is not None else 0, table_name=args.table)
         if args.table != "all":
-            raise Stop("--table requires --recheck or --ls")
+            raise Stop("--table requires check or history")
         signer = Path(args.signer).expanduser()
         return run_folder(folder, run=client_runner(), say=say,
                           ui=Prompts() if sys.stdin.isatty() else None, dry_run=args.dry_run, yes=args.yes,
