@@ -1194,7 +1194,7 @@ def recheck_all(runs: list[Path], *, say: Callable[[str], None], table_name: str
     return 0
 
 
-def show_notifications(*, run: Runner, say: Callable[[str], None], days: int = 30,
+def show_notifications(*, run: Runner, say: Callable[[str], None], days: int = 1,
                        table_name: str = "all", sb: bool = False, be: bool = False,
                        raw: bool = False, as_json: bool = False) -> int:
     if table_name == "esanchit":
@@ -1244,7 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("folder_or_command", nargs="?", default=None,
                         help="folder to process, or command ('check', 'history')")
     parser.add_argument("sub_target", nargs="?", default=None,
-                        help="target for check ('notifications', 'sb', 'be') or folder for 'history'")
+                        help="target for check ('notices', 'sb', 'be') or folder for 'history'")
     parser.add_argument("--dry-run", action="store_true", help="show files and guessed codes only; sign and upload nothing")
     parser.add_argument("--yes", action="store_true", help="skip the upload confirmation (required when not on a terminal)")
     parser.add_argument("--no-sign", action="store_true", help="do not run the signer; use only files already signed")
@@ -1258,7 +1258,7 @@ def main(argv: list[str] | None = None) -> int:
                               help="combine and show tables from all completed runs (same as --history)")
     history_mode.add_argument("--recheck", action="store_true",
                               help="show tables from a specific completed run without uploading")
-    history_mode.add_argument("--notifications", "--notices", action="store_true",
+    history_mode.add_argument("--notices", action="store_true",
                               help="show ICEGATE notifications without uploading")
 
     parser.add_argument("--table", choices=("all", "esanchit", "sb", "be"), default="all",
@@ -1287,7 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd_lower = first.lower()
 
         # 1. CHECK ROUTE
-        is_notices_explicit = args.notifications or (cmd_lower in ("notifications", "notices"))
+        is_notices_explicit = args.notices or (cmd_lower in ("notices", "notifications"))
         is_check_cmd = (cmd_lower == "check")
         is_portal_shortcut = (args.sb or args.be) and not is_notices_explicit and not first
 
@@ -1303,14 +1303,14 @@ def main(argv: list[str] | None = None) -> int:
                     target = "sb"
                 elif sub_lower in ("be", "bill-of-entry", "bills-of-entry"):
                     target = "be"
-                elif sub_lower in ("notifications", "notices"):
+                elif sub_lower in ("notices", "notifications"):
                     target = "notifications"
                 elif not sub_lower:
                     if args.sb and args.be:
                         raise Stop("cannot specify both --sb and --be")
                     target = "sb" if args.sb else ("be" if args.be else "notifications")
                 else:
-                    raise Stop(f"unknown check target: {second!r}; expected 'notifications', 'sb', or 'be'")
+                    raise Stop(f"unknown check target: {second!r}; expected 'notices', 'sb', or 'be'")
             elif is_notices_explicit:
                 if args.sb and args.be:
                     raise Stop("cannot specify both --sb and --be")
@@ -1321,11 +1321,11 @@ def main(argv: list[str] | None = None) -> int:
                 target = "sb" if args.sb else "be"
 
             if args.days is not None:
-                days = parse_days_value(args.days, default=30 if target == "notifications" else 1)
+                days = parse_days_value(args.days, default=1)
             elif args.time_preset is not None:
                 days = args.time_preset
             else:
-                days = 30 if target == "notifications" else 1
+                days = 1
 
             if target == "notifications":
                 return show_notifications(
@@ -1395,8 +1395,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if cmd_lower != "file" and second:
             raise Stop(f"unexpected argument: {second!r}")
-        if args.sb or args.be or args.notifications or args.days is not None or args.time_preset is not None or args.raw or args.json:
-            raise Stop("check options (--sb, --be, --days, --today, --week, --month, --raw, --json) cannot be used when filing a folder")
+        if args.sb or args.be or args.notices or args.days is not None or args.time_preset is not None or args.raw or args.json:
+            raise Stop("check options (--sb, --be, --notices, --days, --today, --week, --month, --raw, --json) cannot be used when filing a folder")
         if args.wait is not None and (not math.isfinite(args.wait) or args.wait < 0):
             raise Stop("--wait must be a finite number of seconds, zero or greater")
         folder = Path(folder_str).expanduser().resolve()

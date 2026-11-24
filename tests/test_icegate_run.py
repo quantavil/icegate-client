@@ -520,10 +520,10 @@ def test_icerun_check_command(tmp_path, monkeypatch, capsys):
         return run
     monkeypatch.setattr(mod, "client_runner", fake_client_runner)
 
-    # 1. icerun check (defaults to notifications 30 days)
+    # 1. icerun check (defaults to notifications 1 day)
     res = mod.main(["check"])
     assert res == 0
-    assert calls[-1] == ["notifications", "--days", "30", "--events"]
+    assert calls[-1] == ["notifications", "--days", "1", "--events"]
     assert "NOTICES_TABLE" in capsys.readouterr().out
 
     # 2. icerun check --days 2
@@ -531,8 +531,8 @@ def test_icerun_check_command(tmp_path, monkeypatch, capsys):
     assert res == 0
     assert calls[-1] == ["notifications", "--days", "2", "--events"]
 
-    # 3. icerun check notifications --days 2
-    res = mod.main(["check", "notifications", "--days", "2"])
+    # 3. icerun check notices --days 2
+    res = mod.main(["check", "notices", "--days", "2"])
     assert res == 0
     assert calls[-1] == ["notifications", "--days", "2", "--events"]
 
@@ -551,39 +551,50 @@ def test_icerun_check_command(tmp_path, monkeypatch, capsys):
     assert res == 0
     assert calls[-1] == ["ecopy", "be", "--month"]
 
-    # 7. Backward compatibility: upload --notifications --table sb --days 2
-    res = mod.main(["--notifications", "--table", "sb", "--days", "2"])
+    # 7. icerun --notices (defaults to 1 day)
+    res = mod.main(["--notices"])
+    assert res == 0
+    assert calls[-1] == ["notifications", "--days", "1", "--events"]
+
+    # 8. icerun --notices --table sb --days 2
+    res = mod.main(["--notices", "--table", "sb", "--days", "2"])
     assert res == 0
     assert calls[-1] == ["notifications", "--days", "2", "--events", "--doc", "SB"]
 
-    # 8. Backward compatibility: upload FOLDER --notifications --sb
-    res = mod.main([str(tmp_path), "--notifications", "--sb"])
+    # 9. icerun FOLDER --notices --sb (defaults to 1 day)
+    res = mod.main([str(tmp_path), "--notices", "--sb"])
     assert res == 0
-    assert calls[-1] == ["notifications", "--days", "30", "--events", "--doc", "SB"]
+    assert calls[-1] == ["notifications", "--days", "1", "--events", "--doc", "SB"]
 
-    # 9. Backward compatibility: upload --sb --week
+    # 10. Backward compatibility: upload --sb --week
     res = mod.main(["--sb", "--week"])
     assert res == 0
     assert calls[-1] == ["ecopy", "sb", "--week"]
 
-    # 10. icerun check notifications --sb (GOLDFISH-2 fix)
-    res = mod.main(["check", "notifications", "--sb"])
+    # 11. icerun check notices --sb (defaults to 1 day)
+    res = mod.main(["check", "notices", "--sb"])
     assert res == 0
-    assert calls[-1] == ["notifications", "--days", "30", "--events", "--doc", "SB"]
+    assert calls[-1] == ["notifications", "--days", "1", "--events", "--doc", "SB"]
 
-    # 11. Conflicting --sb and --be (GOLDFISH-6 fix)
+    # 12. --notification and --notifications are removed (unrecognized arguments)
+    with pytest.raises(SystemExit):
+        mod.main(["--notification"])
+    with pytest.raises(SystemExit):
+        mod.main(["--notifications"])
+
+    # 13. Conflicting --sb and --be (GOLDFISH-6 fix)
     res = mod.main(["check", "--sb", "--be"])
     assert res == 1
     assert "cannot specify both --sb and --be" in capsys.readouterr().err
 
-    # 12. Safety: check flags with folder must NOT trigger upload (GOLDFISH-1 fix)
+    # 14. Safety: check flags with folder must NOT trigger upload (GOLDFISH-1 fix)
     folder = tmp_path / "job_folder"
     folder.mkdir()
     res = mod.main([str(folder), "--sb"])
     assert res == 1
     assert "check options" in capsys.readouterr().err
 
-    # 13. Safety: unexpected positional argument with folder (GOLDFISH-1 fix)
+    # 15. Safety: unexpected positional argument with folder (GOLDFISH-1 fix)
     res = mod.main([str(folder), "typo_arg"])
     assert res == 1
     assert "unexpected argument: 'typo_arg'" in capsys.readouterr().err

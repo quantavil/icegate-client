@@ -205,7 +205,8 @@ Replace `FILE_PATH` with the path to your folder containing the files. The folde
 
 3. **Live ICEGATE Status Checks:**
    ```bash
-   icerun check                      # Recent dashboard notifications (default: 30 days)
+   icerun check                      # Recent dashboard notifications (default: 1 day)
+   icerun --notices                  # Recent dashboard notifications (default: 1 day)
    icerun check --days 2             # Notifications from last 2 days
    icerun check sb --days 1          # Today's Shipping Bills from customs portal
    icerun check sb --days 7          # Last 7 days of Shipping Bills
