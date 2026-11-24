@@ -120,7 +120,7 @@ def catalog() -> dict[str, str]:
 
 
 # Abbreviations in file names, spelled out in the catalogue's own words.
-_ABBREVIATIONS = {"inv": "invoice", "pl": "packing list", "pack": "packing list"}
+_ABBREVIATIONS = {"inv": "invoice", "ci": "commercial invoice", "pl": "packing list", "pack": "packing list"}
 _STOP_WORDS = {"of", "the", "and", "a", "an", "for", "by", "from", "or", "to", "in", "with", "which"}
 
 
