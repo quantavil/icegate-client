@@ -318,6 +318,14 @@ def test_codes_are_chosen_per_file_with_the_last_answer_as_default(tmp_path):
     assert seen.defaults[0] == "331000"                       # at a terminal it is pre-selected
 
 
+def test_doc_type_map_override(tmp_path):
+    folder = make(tmp_path, "CustomDoc.pdf", signed=False)
+    run, said = FakeRun(tmp_path), []
+    assert go(folder, tmp_path, run, signer=fake_signer(tmp_path), said=said.append,
+              doc_type_map=["CustomDoc.pdf=022CO1"], yes=True) == 0
+    assert any("--doc-type-map=CustomDoc_Signed.pdf=022CO1" in part for call in run.calls for part in call)
+
+
 def test_unsigned_originals_are_signed_first_then_uploaded(tmp_path):
     folder = make(tmp_path, "Commercial Invoice 1.pdf", "Customs invoice 2.pdf", signed=False)
     run, said = FakeRun(tmp_path), []

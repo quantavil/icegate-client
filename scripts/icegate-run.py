@@ -162,12 +162,23 @@ def candidates(stem: str, known: dict[str, str]) -> tuple[list[str], bool]:
 DEFAULT_CODE = "331000"  # commercial invoice including packing list: the code for a file whose name says nothing
 
 
-def assign_codes(items: list[Item], ui: Prompts | None, known: dict[str, str]) -> None:
+def assign_codes(items: list[Item], ui: Prompts | None, known: dict[str, str], overrides: dict[str, str] | None = None) -> None:
     """Every PDF gets a code. With a terminal the user picks per file, the guess pre-selected;
     without one, only a code the catalogue pins to a single entry is used. When the name does not
     point to a code, DEFAULT_CODE is used (and pre-selected at a terminal)."""
     previous: dict[tuple[str, ...], str] = {}
+    overrides = overrides or {}
     for item in items:
+        code_override = (
+            overrides.get(item.signed.name)
+            or (overrides.get(item.original.name) if item.original else None)
+            or overrides.get(item.label)
+        )
+        if code_override:
+            if code_override not in known:
+                raise Stop(f"{item.signed.name}: unknown document code {code_override!r}")
+            item.code = code_override
+            continue
         options, sure = candidates(item.label, known)
         fallback = DEFAULT_CODE if DEFAULT_CODE in known else None
         if ui is None:
@@ -893,7 +904,8 @@ def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str =
 # ---------------------------------------------------------------- the run
 def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
                ui: Prompts | None, dry_run: bool = False, yes: bool = False,
-               signer: Path | None = None, wait: float = 0) -> int:
+               signer: Path | None = None, wait: float = 0,
+               doc_type: str | None = None, doc_type_map: list[str] | None = None) -> int:
     done_dir = folder / "Done"
     if done_dir.exists() and not done_dir.is_dir():
         raise Stop("'Done' exists and is not a folder")
@@ -948,18 +960,38 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
             say(f"location {location} (read from the {kind} file)")
         numbered[kind] = (group, [job for i in group if (job := sb_job(i.signed, kind))], location)
     known = catalog()
+    overrides: dict[str, str] = {}
+    if doc_type:
+        overrides.update({i.signed.name: doc_type for i in pdfs})
+    for pair in doc_type_map or []:
+        if "=" not in pair:
+            raise Stop(f"--doc-type-map expects FILE=CODE, got {pair!r}")
+        name, code = pair.split("=", 1)
+        name, code = name.strip(), code.strip()
+        matched = False
+        for item in pdfs:
+            if name in (item.signed.name, item.original.name if item.original else "", item.label):
+                overrides[item.signed.name] = code
+                matched = True
+        if not matched:
+            raise Stop(f"--doc-type-map file not found: {name}")
+
     if dry_run:
         for item in pdfs:
-            options, sure = candidates(item.label, known)
-            say(f"eSANCHIT  {item.signed.name}  ->  " + (f"{options[0]}  {known[options[0]]}" if sure
-                else "you will choose" + (f" (suggested: {', '.join(options[:4])})" if options else "")))
+            code = overrides.get(item.signed.name)
+            if code:
+                say(f"eSANCHIT  {item.signed.name}  ->  {code}  {known.get(code, '')}")
+            else:
+                options, sure = candidates(item.label, known)
+                say(f"eSANCHIT  {item.signed.name}  ->  " + (f"{options[0]}  {known[options[0]]}" if sure
+                    else "you will choose" + (f" (suggested: {', '.join(options[:4])})" if options else "")))
         for item in filings:
             say(f"filing    {item.signed.name}")
         say("dry run only; nothing signed or uploaded")
         return 0
     if ui is None and not yes:
         raise Stop("not a terminal: pass --yes to upload without a prompt")
-    assign_codes(pdfs, ui, known)
+    assign_codes(pdfs, ui, known, overrides)
     if ui is not None and pdfs:
         ui.summary([(i.signed.name, i.code, known[i.code]) for i in pdfs])
     else:
@@ -1278,6 +1310,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="machine-readable JSON output")
     parser.add_argument("--wait", type=float, default=None, metavar="SECONDS",
                         help="wait for SB numbers (default: 600 seconds for upload, 0 for history)")
+    parser.add_argument("--type", "--doc-type", dest="doc_type", default=None,
+                        help="document code applied to every file")
+    parser.add_argument("--doc-type-map", action="append", default=[],
+                        help="per-file document code (e.g. --doc-type-map FILE=CODE)")
     parser.add_argument("--signer", default=os.environ.get("ICEGATE_SIGN_SCRIPT") or Path(__file__).resolve().with_name("sign-all.py"))
     args = parser.parse_args(argv)
     say = lambda text: print(text, flush=True)  # noqa: E731
@@ -1408,7 +1444,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_folder(folder, run=client_runner(), say=say,
                           ui=Prompts() if sys.stdin.isatty() else None, dry_run=args.dry_run, yes=args.yes,
                           signer=None if args.no_sign or not signer.is_file() else signer,
-                          wait=args.wait if args.wait is not None else 600)
+                          wait=args.wait if args.wait is not None else 600,
+                          doc_type=args.doc_type, doc_type_map=args.doc_type_map)
     except Stop as exc:
         print(f"stopped: {exc}", file=sys.stderr)
         return 1
