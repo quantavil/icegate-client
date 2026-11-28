@@ -301,7 +301,7 @@ and receipt path; a filing 202 is not final, the filing-status email decides.
 
 ### Machine interface
 
-Other programs (the Gmail monitor in `~/Documents/monitor`) use `icerun` as a tool and must not know ICEGATE
+Other programs (mailmon, the Gmail monitor in `~/Documents/mailmon`) use `icerun` as a tool and must not know ICEGATE
 internals. Anything about ICEGATE (token id, run-folder layout, file suffixes, notice wording, table files)
 belongs here, reached through `--token`, `--json` (upload), `--lookup` and `--drafts`; see the README, section
 "Machine interface", for the exact JSON. Keep those shapes stable and add fields rather than renaming. With `--json`,
