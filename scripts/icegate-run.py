@@ -6,6 +6,11 @@
 """One command: sign a folder, pick the document type per file, confirm, upload, draft, archive.
 
   scripts/icegate-run.py FOLDER [--wait SECONDS] [--dry-run] [--yes] [--no-sign]
+  scripts/icegate-run.py --lookup RUN_DIR [RUN_DIR ...]   # one login, one JSON line per filed job
+  scripts/icegate-run.py --refile RUN_DIR --yes          # file a "not filed" run again, once
+  scripts/icegate-run.py FOLDER --yes --wait 0 --json     # upload; stdout is ONE JSON line (see README)
+  scripts/icegate-run.py --drafts DIR [DIR ...]          # list the reply tables of job folders / runs (read only)
+  scripts/icegate-run.py --token                         # is the DSC token plugged in? (JSON line, exit 0 / 1)
 
 Boundaries. The private signer (scripts/sign-all.py) is run as a separate program and alone
 handles the PIN and token; this script never sees them. The icegate client owns the portal and
@@ -41,6 +46,9 @@ CLIENT = Path(os.environ.get("ICEGATE_CLIENT_DIR") or Path(__file__).resolve().p
 STATE_ENV = os.environ.get("ICEGATE_STATE_DIR")
 STATE = Path(STATE_ENV or "~/.local/state/icegate-client").expanduser()
 FILING_SUFFIXES = {".sb", ".be"}
+DRAFT_KINDS = ("esanchit", "sb", "be", "error")  # reply-table order; "error" is the rejection table
+TOKEN_USB = os.environ.get("ICEGATE_TOKEN_USB") or "2ccf:080a"  # the HYP2003 DSC token (vendor:product)
+USB_DEVICES = Path("/sys/bus/usb/devices")
 _CHALLENGE = re.compile(r"^challenge\s+((?:SUBMIT|FILE) \d+ ([0-9a-f]{12}))\s*$", re.M)
 _RECEIPT = re.compile(r"^receipt\s+(\S.*?)\s*$", re.M)
 # The SB and BE records both start: F, location, job number, date.
@@ -81,15 +89,8 @@ class Stop(Exception):
     """The run stopped on purpose."""
 
 
-class NotYet(Stop):
-    """The portal has not registered the SB number yet."""
-
-
 class Unsure(Stop):
     """An upload may have reached the portal; the caller records it in Done before stopping."""
-
-
-POLL_SECONDS = 30  # each check is a fresh client login, so do not hammer the portal
 
 
 @dataclass
@@ -269,9 +270,23 @@ class Ledger:
     """
 
     def __init__(self, done_dir: Path) -> None:
+        self.done_dir = done_dir
         self.pending_path = done_dir / ".pending.json"
         self.entries: dict[str, dict] = {}
-        runs = sorted(p for p in done_dir.iterdir() if p.is_dir() and not p.is_symlink()) if done_dir.is_dir() else []
+        self._load_entries()
+        try:
+            self.pending: dict[str, dict] = json.loads(self.pending_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            self.pending = {}
+        except (OSError, ValueError):
+            raise Stop(f"cannot read {self.pending_path}") from None
+
+    def _load_entries(self) -> None:
+        """Read every `Done/<run>/.uploaded.json`; dot-folders (`Done/.deleted`) are not runs."""
+        self.entries = {}
+        done_dir = self.done_dir
+        runs = sorted(p for p in done_dir.iterdir() if p.is_dir() and not p.is_symlink()
+                      and not p.name.startswith(".")) if done_dir.is_dir() else []
         for run in runs:
             try:
                 data = json.loads((run / ".uploaded.json").read_text(encoding="utf-8"))
@@ -284,12 +299,10 @@ class Ledger:
                 hashes = [*previous.get("source_hashes", [])]
                 hashes += [h for h in entry.get("source_hashes", []) if h not in hashes]
                 self.entries[key] = {**entry, "source_hashes": hashes, "run": run.name}
-        try:
-            self.pending: dict[str, dict] = json.loads(self.pending_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            self.pending = {}
-        except (OSError, ValueError):
-            raise Stop(f"cannot read {self.pending_path}") from None
+
+    def reload(self) -> None:
+        """Read the Done folder again (after a run was removed)."""
+        self._load_entries()
 
     def remember_signed(self, folder: Path, paths: list[Path], source_hashes: dict[str, str]) -> None:
         for path in paths:
@@ -334,8 +347,12 @@ class Ledger:
         return self.entries.get(path.name.casefold())
 
     def record(self, items: list[Item], plan_id: str, source_hashes: dict[str, str], archive: Path,
-               status: str | None = None) -> None:
-        """Write the items into `archive/.uploaded.json`; `status="unknown"` marks an unconfirmed upload."""
+               status: str | None = None, baselines: dict[str, int | None] | None = None) -> None:
+        """Write the items into `archive/.uploaded.json`; `status="unknown"` marks an unconfirmed upload.
+
+        `baselines` maps a signed name (any case) to how many notices ICEGATE held for that filing just before
+        the upload (None: they could not be read). Without it a later lookup cannot tell old notices from new.
+        """
         now = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")
         archive.mkdir(parents=True, exist_ok=True)
         path = archive / ".uploaded.json"
@@ -347,6 +364,9 @@ class Ledger:
             key = item.signed.name.casefold()
             hashes = [source_hashes[key]] if source_hashes.get(key) else []
             data[key] = {"plan_id": plan_id, "at": now, "source_hashes": hashes, **({"status": status} if status else {})}
+            if baselines and item.signed.name.casefold() in {k.casefold() for k in baselines}:
+                count = next(v for k, v in baselines.items() if k.casefold() == key)
+                data[key]["baseline"] = {"seen": count} if count is not None else None
             self.entries[key] = {**data[key], "run": archive.name}
         write_json_atomic(path, data)
         self.forget_pending([item.signed for item in items])
@@ -724,92 +744,6 @@ def pause_plain(say: Callable[[str], None]) -> Callable[[str, float], None]:
     return pause
 
 
-Notices = Callable[[list[tuple[str, str]]], "dict[tuple[str, str], str]"]
-
-
-def sb_draft(run: Runner, location: str, jobs: list[tuple[str, str]], wait: float,
-             pause: Callable[[str, float], None], *, kind: str = "SB",
-             notices: Notices | None = None, failures: dict[tuple[str, str], str] | None = None) -> str:
-    """The SB/BE number can take a couple of minutes to appear after a filing; check until it does.
-
-    `notices` maps jobs to a portal rejection message. A rejected job is dropped from the wait (it will
-    never get a number) and recorded in `failures`; when every job is rejected the draft is impossible.
-    """
-    failures = {} if failures is None else failures
-    build = be_html if kind == "BE" else sb_html
-    deadline = time.monotonic() + wait
-    try:
-        while True:
-            if notices:
-                failures.update(notices([j for j in dict.fromkeys(jobs) if j not in failures]))
-            live = [j for j in jobs if j not in failures]
-            if not live:
-                # Notices carry no time: an old rejection of the same job number can sit beside a later
-                # success. The e-copy record is the evidence, so look once before giving up.
-                try:
-                    return build(sb_rows(run, location, list(dict.fromkeys(jobs)), kind))
-                except (NotYet, Stop):
-                    raise Stop(f"no {kind} number will be issued: ICEGATE rejected every job") from None
-            try:
-                return build(sb_rows(run, location, live, kind))
-            except NotYet as exc:
-                if time.monotonic() >= deadline:
-                    raise
-                remaining = max(0, deadline - time.monotonic())
-                delay = min(POLL_SECONDS, remaining)
-                pause(f"{exc}; checking again in {delay:.0f}s (Ctrl-C to skip the {kind} draft)", delay)
-    except KeyboardInterrupt:
-        raise Stop(f"stopped waiting for the {kind} number") from None
-
-
-def portal_events(run: Runner) -> list[dict] | None:
-    """Filing outcomes from the portal's notifications, newest first; None when they cannot be read."""
-    out = run(["notifications", "--events", "--json"])
-    if out.returncode:
-        return None
-    try:
-        events = json.loads(out.stdout)
-    except ValueError:
-        return None
-    return events if isinstance(events, list) else None
-
-
-def job_events(events: list[dict], location: str, job: tuple[str, str]) -> list[dict]:
-    number, job_date = job
-    return [e for e in events if e.get("job") == number and e.get("date") == job_date
-            and e.get("location") in (None, location.upper())]
-
-
-def notice_watcher(run: Runner, location: str, jobs: list[tuple[str, str]],
-                   say: Callable[[str], None], baseline: list[dict]) -> Notices:
-    """Report new portal outcomes for these jobs.
-
-    Notifications carry no time, so a job that was filed before (same number and date) is judged only by
-    what is not in `baseline`, the events fetched before uploading (empty: judge by everything).
-    """
-    seen = {job: len(job_events(baseline, location, job)) for job in dict.fromkeys(jobs)}
-    told: set[str] = set()
-
-    def check(live: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
-        events = portal_events(run)
-        failed: dict[tuple[str, str], str] = {}
-        if events is None:  # unreadable now: say nothing rather than guess
-            return failed
-        for job in live:
-            matching = job_events(events, location, job)
-            for event in reversed(matching[:max(0, len(matching) - seen[job])]):  # new ones, oldest first
-                text = f"ICEGATE, job {job[0]}: {event['message']}"
-                if event["outcome"] == "submitted":
-                    failed.pop(job, None)  # a later acceptance supersedes an earlier rejection (a refile)
-                    if text not in told:
-                        told.add(text)
-                        say(text)
-                else:
-                    failed[job] = event["message"] + (f" ({event['detail']})" if event.get("detail") else "")
-        return failed
-    return check
-
-
 def clipboard_command(text: str) -> tuple[list[str], bytes | None] | None:
     """The program that puts `text` on the clipboard as rich text, and the stdin it needs."""
     if sys.platform == "darwin":
@@ -839,6 +773,14 @@ def copy_html(text: str) -> bool:
         return False
 
 
+# ---------------------------------------------------------------- lookup: numbers and notices
+POLL_SECONDS = 60  # each round is one client login (three requests); keep it gentle
+RUN_NAME = re.compile(r"\d{8}-\d{6}-\d{6}")
+PROBLEMS = ("not_filed", "failed")
+NOT_RECEIVED_AFTER = timedelta(minutes=5)  # ICEGATE shows a file in Job Status within moments; later means it never came
+IST = ZoneInfo("Asia/Kolkata")
+
+
 def _portal_day(value: object) -> date | None:
     """A portal date (DD-MM-YYYY, or the UTC timestamps `portal_date` reads) as a date; None if unreadable."""
     try:
@@ -853,59 +795,564 @@ def _registered(row: dict, kind: str) -> bool:
     return has("docNumber") and (kind == "BE" or has("docDate"))
 
 
-def sb_rows(run: Runner, location: str, jobs: list[tuple[str, str]], kind: str = "SB",
-            today: date | None = None) -> list[dict]:
-    """The registered SB/BE records for these (job number, job date in the file) pairs.
+def match_rows(rows: list, kind: str, location: str, job: str, file_date: date | str,
+               today: date | None = None) -> list[dict]:
+    """The registered e-copy records of one filing: its location and job number, inside its date window.
 
     The portal's own job date is the day ICEGATE processed the file, not the date written in it (observed:
-    file 20261113, e-copy 14-11-2026; BE file 20261109, e-copy 13-11-2026), so a search by the file's date
-    finds nothing. One date-range search from the earliest file date to today covers every possible
-    processing day; each job is then matched on location and number, within that window.
+    file 20261113, e-copy 14-11-2026), so a record counts when that day lies between the file's date and
+    `today`. The record's job number can be the filed one plus a two-digit year suffix (642, 64226); the
+    plain number wins, the suffixed one is tried only when the plain one matched nothing.
     """
-    unique = list(dict.fromkeys(jobs))
-    starts = {job: date.fromisoformat(job[1]) for job in unique}
-    first = min(starts.values())
-    last = max([today or datetime.now(ZoneInfo("Asia/Kolkata")).date(), *starts.values()])
-    out = run(["ecopy", "search", kind, "--from", first.isoformat(), "--to", last.isoformat(), "--json"])
-    if out.returncode:
-        raise Stop(f"{kind} search failed: {(out.stderr or out.stdout).strip()[:200]}")
-    try:
-        found = json.loads(out.stdout)
-    except ValueError:
-        raise Stop(f"{kind} search returned invalid JSON") from None
-    if not isinstance(found, list):
-        raise Stop(f"{kind} search returned an unexpected response")
+    start = file_date if isinstance(file_date, date) else date.fromisoformat(file_date)
+    last = max(today or datetime.now(ZoneInfo("Asia/Kolkata")).date(), start)
 
-    def in_window(row: dict, start: date) -> bool:
+    def in_window(row: dict) -> bool:
         if not row.get("jobDate"):
             return True
         day = _portal_day(row["jobDate"])
         return day is not None and start <= day <= last
 
-    rows = []
-    for job in unique:
-        number, start = job[0], starts[job]
-        # The record's job number (what the portal's notices use) can be the e-copy job number minus a
-        # two-digit year suffix (record 642, e-copy 64226), so try the plain number, then the suffixed one.
-        for candidate in (number, f"{number}{job[1][2:4]}"):
-            match = [r for r in found if isinstance(r, dict) and str(r.get("jobNumber")) == candidate
-                     and str(r.get("location") or location).casefold() == location.casefold()
-                     and in_window(r, start) and _registered(r, kind)]
-            if match:
+    for candidate in (job, f"{job}{start:%y}"):
+        found = [r for r in rows if isinstance(r, dict) and str(r.get("jobNumber")) == candidate
+                 and (not location or str(r.get("location") or location).casefold() == location.casefold())
+                 and in_window(r) and _registered(r, kind)]
+        if found:
+            return found
+    return []
+
+
+@dataclass
+class Job:
+    """One signed SB/BE filing to look up. `since` is the upload day: older notices are not about this upload."""
+    kind: str
+    location: str
+    number: str
+    date: str  # the date written in the file, ISO
+    since: date
+    archive: Path | None = None
+    name: str = ""
+    label: str = ""  # the run as the caller named it
+    seen: int | None = None  # notices already there before the upload; when set they replace `since`
+    refiled: bool = False
+    baselined: bool = False  # the run's ledger holds that count; only then is a rejection safe to act on
+    uploaded: datetime | None = None  # when this file was uploaded (the run's ledger); None for a fresh watch
+
+
+def _created(event: dict) -> date | None:
+    try:
+        return datetime.strptime(str(event.get("created")), "%d.%m.%Y").date()
+    except ValueError:
+        return None
+
+
+def job_events(events: list[dict], job: Job) -> list[dict]:
+    """Every notice about this filing (same type, job number, file date, location), newest first."""
+    return [e for e in events if e.get("doc") in (None, job.kind) and e.get("job") == job.number
+            and e.get("date") in (None, job.date) and e.get("location") in (None, job.location.upper())]
+
+
+def latest_event(events: list[dict] | None, job: Job) -> dict | None:
+    """The newest notice that is about this upload.
+
+    Notices carry a day, not a time, and job numbers repeat, so they are judged against what was already
+    there before the upload (`seen`), or else against the upload day. A later acceptance is the newest and
+    so supersedes an earlier rejection.
+    """
+    mine = job_events(events or [], job)
+    if job.seen is not None:
+        mine = mine[:max(0, len(mine) - job.seen)]
+    else:
+        mine = [e for e in mine if (day := _created(e)) is not None and day >= job.since]
+    # "Header validation failed" is what a duplicate upload gets; it says nothing about the first upload
+    mine = [e for e in mine if not str(e.get("detail") or "").lower().startswith("header validation")]
+    return mine[0] if mine else None
+
+
+@dataclass
+class Verdict:
+    job: Job
+    status: str  # found, pending, not_filed, not_received, failed or multiple
+    rows: list[dict]
+    event: dict | None = None
+    draft: Path | None = None
+    note: str = ""
+
+    def as_json(self) -> dict:
+        row = self.rows[0] if self.status == "found" else {}
+        shown = self.event if self.status in ("pending", *PROBLEMS) else None
+        docdate = row.get("docDate")
+        return {"run": self.job.label, "file": self.job.name, "kind": self.job.kind.lower(),
+                "location": self.job.location, "job": self.job.number, "status": self.status,
+                "number": str(row["docNumber"]) if row else None,
+                "date": None if not row else ("-" if str(docdate or "").strip() in ("", "-") else _show_date(docdate)),
+                "draft": str(self.draft) if self.draft else None, "note": self.note,
+                "notice": {"message": shown["message"], "date": shown.get("created")} if shown else None,
+                "errors": list(shown.get("errors") or []) if shown and self.status == "failed" else [],
+                "refiled": self.job.refiled}
+
+
+def _show_date(value: object) -> str:
+    try:
+        return portal_date(value)
+    except Stop:
+        return str(value)
+
+
+def fetch(run: Runner, jobs: list[Job], *, events: bool = True) -> dict:
+    """One client call, one login: a date-range search per kind plus the filing notices."""
+    windows: dict[str, date] = {}
+    for job in jobs:
+        start = date.fromisoformat(job.date)
+        windows[job.kind] = min(start, windows.get(job.kind, start))
+    argv = ["ecopy", "lookup", *(a for kind, start in sorted(windows.items()) for a in ("--window", f"{kind}={start.isoformat()}"))]
+    if events:
+        argv.append("--events")
+    for kind, location in sorted({(j.kind, j.location.upper()) for j in jobs if j.uploaded}):
+        argv += ["--job-status", f"{kind}:{location}"]
+    out = run(argv)
+    if out.returncode:
+        raise Stop(f"portal lookup failed: {(out.stderr or out.stdout).strip()[:200]}")
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        raise Stop("portal lookup returned invalid JSON") from None
+    if not isinstance(data, dict) or not isinstance(data.get("ecopy"), dict):
+        raise Stop("portal lookup returned an unexpected response")
+    return data
+
+
+def received(rows: object, job: Job) -> bool | None:
+    """Did ICEGATE's Job Status list this job as received at or after the upload? None: cannot tell."""
+    if not isinstance(rows, list) or not job.uploaded:
+        return None
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("jobNo")).strip() != job.number:
+            continue
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                stamp = datetime.strptime(str(row.get("inboundRecievedTimestamp")), fmt).replace(tzinfo=IST)
+            except ValueError:
+                continue
+            if stamp >= job.uploaded:
+                return True
+            break
+    return False
+
+
+def judge(jobs: list[Job], data: dict, now: datetime | None = None) -> list[Verdict]:
+    try:
+        today = date.fromisoformat(str(data.get("today")))
+    except ValueError:
+        today = None
+    events = data.get("events") if isinstance(data.get("events"), list) else None
+    unread = f" (notices unreadable: {data['events_error']})" if events is None and data.get("events_error") else ""
+    out = []
+    now = now or datetime.now(IST)
+    job_status = data.get("job_status") if isinstance(data.get("job_status"), dict) else {}
+    for job in jobs:
+        rows = data["ecopy"].get(job.kind) or []
+        found = match_rows(rows if isinstance(rows, list) else [], job.kind, job.location, job.number, job.date, today)
+        event = latest_event(events, job)
+        if len(found) > 1:
+            out.append(Verdict(job, "multiple", found, note=f"{len(found)} {job.kind} records match; check ICEGATE"))
+        elif found:
+            out.append(Verdict(job, "found", found))
+        elif event and event.get("problem") == "not_filed":
+            out.append(Verdict(job, "not_filed", [], event,
+                               note="ICEGATE did not file it" + (f"; file it again: icerun --refile {job.label} --yes"
+                                                                 if job.baselined else "")))
+        elif event and event.get("problem") == "failed":
+            out.append(Verdict(job, "failed", [], event, note="ICEGATE rejected the file with errors; fix it"))
+        elif (received(job_status.get(f"{job.kind}:{job.location.upper()}"), job) is False
+              and now - job.uploaded >= NOT_RECEIVED_AFTER):
+            out.append(Verdict(job, "not_received", [], event,
+                               note="ICEGATE never received the file" + (f"; file it again: icerun --refile {job.label} --yes"
+                                                                       if job.baselined else "")))
+        else:
+            out.append(Verdict(job, "pending", [], event, note=(
+                "accepted for processing; the number is not registered yet" if event else "no number or notice yet") + unread))
+    for verdict in out:
+        if verdict.job.archive and not verdict.job.baselined:
+            verdict.note = (verdict.note + "; " if verdict.note else "") + (
+                "no baseline: the notices before the upload were not recorded, so an older notice of the same day may be "
+                "counted; check the notices by hand" if verdict.status in PROBLEMS else "no baseline")
+    return out
+
+
+def baseline(run: Runner, jobs: list[Job], say: Callable[[str], None]) -> None:
+    """Count the notices already there, before uploading, so later ones can be told apart."""
+    why = ""
+    try:
+        data = fetch(run, [], events=True)
+        events = data.get("events")
+        why = str(data.get("events_error") or "")
+    except Stop as exc:
+        events, why = None, str(exc)
+    if not isinstance(events, list):
+        say(f"note: could not read ICEGATE notices ({why or 'no data'}); rejections will be judged by their date only")
+    else:
+        for job in jobs:
+            job.seen = len(job_events(events, job))
+            job.baselined = True
+
+
+def poll(run: Runner, jobs: list[Job], wait: float, say: Callable[[str], None],
+         pause: Callable[[str, float], None]) -> list[Verdict]:
+    """Look up every job with ONE client call per round until none is pending or `wait` seconds are over."""
+    deadline = time.monotonic() + wait
+    verdicts: list[Verdict] = []
+    try:
+        while True:
+            try:
+                verdicts = judge(jobs, fetch(run, jobs))
+            except Stop as exc:
+                say(f"note: check failed: {exc}")
+            if verdicts and not any(v.status == "pending" for v in verdicts):
                 break
-        if not match:
-            raise NotYet(f"no {kind} found yet for job {number}")
-        if len(match) != 1:
-            raise Stop(f"multiple {kind} results for job {number}; check ICEGATE before drafting")
-        rows.extend(match)
-    return rows
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            delay = min(POLL_SECONDS, remaining)
+            waiting = sum(v.status == "pending" for v in verdicts) or len(jobs)
+            pause(f"{waiting} job(s) not registered yet; checking again in {delay:.0f}s (Ctrl-C to stop waiting)", delay)
+    except KeyboardInterrupt:
+        raise Stop("stopped waiting for the numbers") from None
+    if not verdicts:
+        raise Stop("the portal could not be checked")
+    return verdicts
+
+
+def error_html(failed: list[Verdict]) -> str:
+    rows = [[v.job.number, v.job.name, error] for v in failed for error in (v.event or {}).get("errors") or [v.event["message"]]]
+    return page("ICEGATE rejected the filing(s) below with these errors:", [table(["Job No", "File Name", "Error"], rows)])
+
+
+def write_drafts(verdicts: list[Verdict]) -> None:
+    """Write the draft tables a lookup makes possible; an existing draft is never overwritten.
+
+    A kind's number table is written once every job of that kind in the run has its number, and an error
+    table for the failed ones (rewritten when the errors change).
+    """
+    groups: dict[tuple[Path, str], list[Verdict]] = {}
+    for verdict in verdicts:
+        if verdict.job.archive:
+            groups.setdefault((verdict.job.archive, verdict.job.kind), []).append(verdict)
+    for (archive, kind), group in groups.items():
+        path = archive / f"draft-{kind.lower()}.html"
+        found = [v for v in group if v.status == "found"]
+        try:
+            if path.exists():
+                for v in found:
+                    v.draft, v.note = path, "draft already exists; left as it is"
+            elif found and len(found) == len(group):
+                path.write_text((be_html if kind == "BE" else sb_html)([v.rows[0] for v in group]), encoding="utf-8")
+                for v in found:
+                    v.draft = path
+            else:
+                for v in found:
+                    v.note = f"{len(group) - len(found)} other {kind} job(s) of this run have no number yet; no table written"
+        except (Stop, OSError, ValueError) as exc:
+            for v in found:
+                v.note = f"table not written: {exc}"
+    for archive in {v.job.archive for v in verdicts if v.status == "failed" and v.job.archive}:
+        failed = [v for v in verdicts if v.status == "failed" and v.job.archive == archive]
+        path = archive / "draft-error.html"
+        try:
+            text = error_html(failed)
+            if not path.exists() or path.read_text(encoding="utf-8") != text:
+                path.write_text(text, encoding="utf-8")
+            for v in failed:
+                v.draft = path
+        except OSError as exc:
+            for v in failed:
+                v.note += f" (error table not written: {exc.strerror})"
+
+
+def read_entries(archive: Path) -> dict:
+    try:
+        data = json.loads((archive / ".uploaded.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, NotADirectoryError):
+        return {}
+    except (OSError, ValueError):
+        raise Stop(f"cannot read {archive / '.uploaded.json'}") from None
+    return data if isinstance(data, dict) else {}
+
+
+def _uploaded_at(entry: dict) -> datetime | None:
+    try:
+        at = datetime.fromisoformat(str(entry.get("at")))
+    except ValueError:
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=IST)
+
+
+def run_jobs(archive: Path, label: str) -> tuple[list[Job], list[dict]]:
+    """The signed SB/BE files archived in one completed run (Done/<timestamp>), as jobs to look up.
+
+    Files whose location or job number cannot be read come back as ready-made `unreadable` results.
+    """
+    if not archive.is_dir() or (archive / "Done").is_dir() or not RUN_NAME.fullmatch(archive.name):
+        raise Stop(f"{label}: not a completed run folder (expected Done/<timestamp>)")
+    entries = read_entries(archive)
+    days = []
+    for entry in entries.values():
+        try:
+            days.append(date.fromisoformat(str(entry.get("at"))[:10]))
+        except (ValueError, AttributeError):
+            pass
+    since = min(days) if days else datetime.strptime(archive.name, "%Y%m%d-%H%M%S-%f").date()
+    jobs: list[Job] = []
+    bad: list[dict] = []
+    for path in sorted(archive.iterdir()):
+        if (not path.is_file() or path.is_symlink() or path.suffix.lower() not in FILING_SUFFIXES
+                or not path.stem.lower().endswith("_signed")):
+            continue
+        kind = path.suffix[1:].upper()
+        location, job = sb_location(path, kind), sb_job(path, kind)
+        if not location or not job:
+            bad.append({"run": label, "file": path.name, "kind": kind.lower(), "location": location, "job": None,
+                        "status": "unreadable", "number": None, "date": None, "draft": None, "refiled": False,
+                        "note": "cannot read the location and job number from this file", "notice": None, "errors": []})
+            continue
+        entry = entries.get(path.name.casefold()) or {}
+        refile, stored = entry.get("refile"), entry.get("baseline")
+        stored = stored.get("seen") if isinstance(stored, dict) else None
+        stored = stored if isinstance(stored, int) and not isinstance(stored, bool) else None
+        seen = refile.get("seen") if isinstance(refile, dict) and isinstance(refile.get("seen"), int) else stored
+        jobs.append(Job(kind, location, job[0], job[1], since, archive, path.name, label, seen, bool(refile),
+                        baselined=stored is not None, uploaded=_uploaded_at(entry)))
+    return jobs, bad
+
+
+def lookup(runs: list[str], *, run: Runner, say: Callable[[str], None], emit: Callable[[str], None]) -> int:
+    """`--lookup`: ONE login for every job of every given run; one JSON line per job on `emit`."""
+    jobs: list[Job] = []
+    results: list[dict] = []
+    for text in runs:
+        found, bad = run_jobs(Path(text).expanduser().resolve(), text)
+        if not found and not bad:
+            say(f"{text}: no signed .sb/.be files in this run")
+        jobs += found
+        results += bad
+    verdicts: list[Verdict] = []
+    if jobs:
+        verdicts = judge(jobs, fetch(run, jobs))
+        write_drafts(verdicts)
+    for item in [*(v.as_json() for v in verdicts), *results]:
+        emit(json.dumps(item, ensure_ascii=False))
+    return 0
+
+
+def token_present(devices: Path | None = None, usb_id: str | None = None) -> bool:
+    """Is the DSC token plugged in? Read only: looks for its USB id under sysfs."""
+    vendor, _, product = (usb_id or TOKEN_USB).partition(":")
+    try:
+        for dev in (devices or USB_DEVICES).glob("*"):
+            try:
+                if (dev / "idVendor").read_text().strip() == vendor and (dev / "idProduct").read_text().strip() == product:
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return False
+
+
+def token(emit: Callable[[str], None], devices: Path | None = None) -> int:
+    """`--token`: one JSON line, exit 0 when the token is plugged in, 1 when not."""
+    present = token_present(devices)
+    emit(json.dumps({"token": "HYP2003", "usb": TOKEN_USB, "present": present}))
+    return 0 if present else 1
+
+
+def list_drafts(paths: list[str], emit: Callable[[str], None]) -> int:
+    """`--drafts`: the reply tables of job folders (holding Done/) or of completed runs, one JSON line each:
+    {"run", "kind": esanchit|sb|be|error, "draft"}. eSANCHIT first, then SB, then BE, then the error table."""
+    found: list[tuple[int, str, str, str]] = []
+    for text in paths:
+        folder = Path(text).expanduser().resolve()
+        if not folder.is_dir():
+            raise Stop(f"{text}: not a folder")
+        done = folder / "Done"
+        runs = ([p for p in done.iterdir() if p.is_dir() and not p.is_symlink() and RUN_NAME.fullmatch(p.name)]
+                if done.is_dir() else [folder])
+        for run in runs:
+            for kind in DRAFT_KINDS:
+                path = run / f"draft-{kind}.html"
+                if path.is_file():
+                    found.append((DRAFT_KINDS.index(kind), str(path), str(run), kind))
+    for _, path, run, kind in sorted(found):
+        emit(json.dumps({"run": run, "kind": kind, "draft": path}, ensure_ascii=False))
+    return 0
+
+
+def mark_refile(archive: Path, seen: dict[str, int], plan_id: str) -> None:
+    """Record, in the run's own ledger, that these files are being filed again (once per run)."""
+    data = read_entries(archive)
+    now = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")
+    for name, count in seen.items():
+        data.setdefault(name.casefold(), {})["refile"] = {"at": now, "plan_id": plan_id, "seen": count}
+    write_json_atomic(archive / ".uploaded.json", data)
+
+
+def clear_refile(archive: Path, names: list[str]) -> None:
+    data = read_entries(archive)
+    for name in names:
+        if isinstance(data.get(name.casefold()), dict):
+            data[name.casefold()].pop("refile", None)
+    write_json_atomic(archive / ".uploaded.json", data)
+
+
+def refile(archive: Path, *, run: Runner, say: Callable[[str], None], yes: bool = False, dry_run: bool = False) -> int:
+    """File an archived run's SB/BE again, once, when ICEGATE says it was not filed or never received it.
+
+    The signed file in the run folder is uploaded as it is (nothing is signed). The Done ledger refuses
+    to upload a folder's files twice; this path is for one run and only for jobs whose newest notice is a
+    bare "not filed" one, or that Job Status never listed. It is recorded in the run's `.uploaded.json` before sending, so it can happen
+    once per run and a crash cannot make it happen twice.
+    """
+    jobs, _ = run_jobs(archive, str(archive))
+    if not jobs:
+        raise Stop("no readable signed .sb/.be files in this run; only SB/BE filings can be filed again")
+    if (again := [j.name for j in jobs if j.refiled]):
+        raise Stop(f"this run was already filed again ({', '.join(again)}); a second refile is refused. "
+                   "Check the portal and your mail")
+    if (blind := [j.name for j in jobs if not j.baselined]):
+        raise Stop(f"no baseline for {', '.join(blind)}: the notices before the upload were not recorded, so a "
+                   "rejection cannot be told from an older one; check the notices by hand. Nothing was filed")
+    data = fetch(run, jobs)
+    verdicts = judge(jobs, data)
+    for v in verdicts:
+        say(f"{v.job.kind} job {v.job.number}: {v.status}")
+    targets = [v for v in verdicts if v.status in ("not_filed", "not_received")]
+    if not targets:
+        raise Stop("nothing to file again: ICEGATE did not report any job as not filed or not received"
+                   + (f" (notices unreadable: {data['events_error']})" if data.get("events") is None else ""))
+    items = [Item(archive / v.job.name) for v in targets]
+    for item in items:
+        if item.signed.is_symlink() or not item.signed.is_file():
+            raise Stop(f"{item.signed.name} is missing from the run folder")
+    for v in targets:
+        say(f"would file again: {v.job.name}  ({(v.event or {}).get('message') or v.note})")
+    if dry_run:
+        say("dry run only; nothing uploaded")
+        return 0
+    if not yes:
+        raise Stop("filing again uploads the signed file once more; check the portal, then pass --yes")
+    upload = plan_upload(run, "filing", ["filing", "upload", *(str(i.signed) for i in items)], items, say)
+    seen = {v.job.name: len(job_events(data["events"], v.job)) for v in targets}
+    mark_refile(archive, seen, upload.plan_id)
+    try:
+        send_upload(run, upload, say)
+    except Unsure:
+        say("the refile stays recorded in .uploaded.json; do not run it again until the portal is checked")
+        raise
+    except Stop:
+        clear_refile(archive, list(seen))  # refused before anything was sent
+        raise
+    say(f"filed again: {', '.join(seen)}. Check with: icerun --lookup {archive}")
+    return 0
+
+
+# ---------------------------------------------------------------- offering to redo an uploaded file
+def run_contents(run: Path) -> list[str]:
+    """Every file in a Done run (the bookkeeping `.uploaded.json` is left out; it goes with the run)."""
+    return sorted(p.name + ("/" if p.is_dir() else "") for p in run.iterdir() if p.name != ".uploaded.json")
+
+
+def run_numbers(run: Path) -> list[str]:
+    """The SB/BE numbers already known from the run's saved reply tables (`draft-sb.html`, `draft-be.html`)."""
+    found: list[str] = []
+    for kind in ("sb", "be"):
+        try:
+            text = (run / f"draft-{kind}.html").read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+        for _, number, _ in re.findall(r"<tr><td>([^<]*)</td><td>([^<]*)</td><td>([^<]*)</td></tr>", text):
+            if number.strip():
+                found.append(f"{kind.upper()} {html.unescape(number.strip())}")
+    return found
+
+
+def retire_run(run: Path, done_dir: Path) -> str:
+    """Take a Done run out of the ledger without destroying it; says where it went.
+
+    The desktop trash (`gio trash`) when it works, otherwise `Done/.deleted/<run>`. Never a plain delete.
+    """
+    if run.parent != done_dir or run.is_symlink() or not run.is_dir() or run.name.startswith("."):
+        raise Stop(f"refusing to remove {run}: not a run folder inside {done_dir}")
+    gio = shutil.which("gio")
+    if gio:
+        try:
+            result = subprocess.run([gio, "trash", str(run)], capture_output=True, text=True, timeout=60, check=False)
+        except (OSError, subprocess.SubprocessError):
+            result = None
+        if result is not None and result.returncode == 0 and not run.exists():
+            return f"moved Done/{run.name} to the trash"
+    graveyard = done_dir / ".deleted"
+    graveyard.mkdir(exist_ok=True)
+    target = graveyard / run.name
+    for n in range(1, 1000):
+        if not target.exists():
+            break
+        target = graveyard / f"{run.name}.{n}"
+    try:
+        shutil.move(str(run), str(target))
+    except OSError as exc:
+        raise Stop(f"could not remove Done/{run.name}: {exc.strerror or exc}; nothing was uploaded") from None
+    return f"moved Done/{run.name} to Done/.deleted/{target.name} (the trash was not available)"
+
+
+def offer_redo(todo: list[Path], ledger: Ledger, source_hashes: dict[str, str], done_dir: Path,
+               ui: Prompts | None, say: Callable[[str], None]) -> None:
+    """Stop on files already uploaded (or of unknown outcome), unless the person agrees to remove that run.
+
+    Every such file is collected first and each run is asked about once. Only an interactive terminal is
+    asked, and the answer is always a fresh yes: `--yes` never agrees to a second filing.
+    """
+    for _ in range(1000):  # each round removes runs, so this ends; the bound is only a guard
+        dups: dict[str, list[Path]] = {}
+        for path in todo:
+            previous = ledger.seen(Path(signed_name(path)))
+            if previous and source_hashes[signed_name(path).casefold()] in previous.get("source_hashes", []):
+                dups.setdefault(previous["run"], []).append(path)
+        if not dups:
+            return
+        if ui is None:
+            first_run, paths = next(iter(dups.items()))
+            raise Stop(f"{paths[0].name} was already uploaded or its outcome is unknown (Done/{first_run}); "
+                       "delete that Done run to upload it again (run icerun in a terminal to be offered that)")
+        for name, paths in dups.items():
+            run = done_dir / name
+            recorded = read_entries(run)
+            signed = [signed_name(p) for p in paths]
+            unknown = any(recorded.get(s.casefold(), {}).get("status") == "unknown" for s in signed)
+            detail = "outcome unknown" if unknown else "uploaded"
+            if numbers := run_numbers(run):
+                detail += "; " + ", ".join(numbers)
+            if not ui.confirm(
+                    f"Done/{name} already holds {', '.join(signed)} ({detail}).\n"
+                    f"  Everything in that run would be removed: {', '.join(run_contents(run)) or '(nothing else)'}.\n"
+                    f"  Uploading again files {'them' if len(signed) > 1 else 'it'} on ICEGATE a second time "
+                    "(a duplicate filing).\n"
+                    "  Delete that run and upload again?"):
+                raise Stop(f"{paths[0].name} was already uploaded or its outcome is unknown (Done/{name}); "
+                           "delete that Done run to upload it again")
+        for name in dups:
+            say(retire_run(done_dir / name, done_dir))
+        ledger.reload()
+    raise Stop("too many earlier runs hold these files; nothing was uploaded")
 
 
 # ---------------------------------------------------------------- the run
 def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
                ui: Prompts | None, dry_run: bool = False, yes: bool = False,
                signer: Path | None = None, wait: float = 0,
-               doc_type: str | None = None, doc_type_map: list[str] | None = None) -> int:
+               doc_type: str | None = None, doc_type_map: list[str] | None = None,
+               report: dict | None = None) -> int:
+    """`report`, when given, collects what was uploaded: report["runs"] gets one entry per upload group
+    ({"dir", "kind": "filing"|"esanchit", "files", "draft"}), for `--json`."""
     done_dir = folder / "Done"
     if done_dir.exists() and not done_dir.is_dir():
         raise Stop("'Done' exists and is not a folder")
@@ -922,12 +1369,7 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
                 + (": " + ", ".join(p.name for p in todo) if len(todo) <= 5 else "")
                 + "; no signer available, sign them first")
         else:
-            for path in todo:
-                key = signed_name(path).casefold()
-                previous = ledger.seen(Path(signed_name(path)))
-                if previous and source_hashes[key] in previous.get("source_hashes", []):
-                    raise Stop(f"{path.name} was already uploaded or its outcome is unknown (Done/{previous['run']}); "
-                               "delete that Done run to upload it again")
+            offer_redo(todo, ledger, source_hashes, done_dir, ui, say)
             for path in todo:
                 if path.suffix.lower() == ".pdf":
                     prepare_pdf(path, say)
@@ -1021,19 +1463,23 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
     drafts: dict[str, Path] = {}
     submitted: list[str] = []
     rejected: list[str] = []
-    failures: dict[str, dict[tuple[str, str], str]] = {"SB": {}, "BE": {}}
-    # Notifications carry no time, so remember what the portal already said about these jobs before uploading.
-    checked = any(jobs and location for _, jobs, location in numbered.values())
-    before = portal_events(run) if checked else None
-    if checked and before is None:
-        say("note: could not read ICEGATE notifications; rejections will not be reported here, so watch your mail")
-    watchers: dict[str, Notices | None] = {kind: notice_watcher(run, location, jobs, say, before) if before is not None else None
-                                           for kind, (_, jobs, location) in numbered.items() if jobs and location}
+    today = stamp.date()
+    watched = [Job(kind, location, job[0], job[1], today, archive, item.signed.name, str(archive))
+               for kind, (group, _, location) in numbered.items() if location
+               for item in group if (job := sb_job(item.signed, kind))]
+    if watched and not dry_run:
+        # Notices carry a day, not a time: count what the portal already says, whatever --wait is, and keep the
+        # count in the run's ledger so a later --lookup or --refile can tell a new notice from an old one.
+        baseline(run, watched, say)
+    baselines = {job.name: job.seen for job in watched}
 
     def finish(upload: Upload) -> None:
         """Record the upload, archive its files, then try the draft; never raises for after-work."""
         submitted.append(f"{upload.group} (plan {upload.plan_id})")
-        ledger.record(upload.items, upload.plan_id, source_hashes, archive)
+        if report is not None:
+            report.setdefault("runs", []).append({"dir": str(archive), "kind": "esanchit" if upload.group == "eSANCHIT" else "filing",
+                                                  "files": [i.signed.name for i in upload.items], "draft": None})
+        ledger.record(upload.items, upload.plan_id, source_hashes, archive, baselines=baselines)
         try:
             archive.mkdir(parents=True, exist_ok=True)
             for item in upload.items:
@@ -1074,7 +1520,7 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
             except Unsure as exc:
                 # Done is the only memory: mark these files so no later run sends them again unseen.
                 try:
-                    ledger.record(upload.items, upload.plan_id, source_hashes, archive, status="unknown")
+                    ledger.record(upload.items, upload.plan_id, source_hashes, archive, status="unknown", baselines=baselines)
                 except OSError as err:
                     raise Stop(f"{exc}\nWARNING: could not record this in {archive} ({err.strerror}); "
                                "move the files out of this folder yourself") from None
@@ -1083,29 +1529,53 @@ def run_folder(folder: Path, *, run: Runner, say: Callable[[str], None],
             finish(upload)
             if upload.group == "eSANCHIT":
                 draft("esanchit", esanchit_draft, upload.receipt or STATE / "receipts" / f"{upload.plan_id}.json", known)
+                if report is not None and "esanchit" in drafts:
+                    report["runs"][-1]["draft"] = str(drafts["esanchit"])
                 share("esanchit")
             else:
                 for kind, (group, jobs, location) in numbered.items():
                     if not jobs or not location or len(jobs) != len(group):
                         say(f"note: no {kind} number check for {kind} files without a readable location and job "
                             f"number in the {kind} record; look them up in ICEGATE")
-                    if not jobs or not location:
-                        continue
-                    say(f"Checking for {kind} numbers for job(s) {', '.join(n for n, _ in jobs)} for up to {wait:g} seconds. "
-                        "Press Ctrl-C to skip the wait; the upload is already complete.")
-                    name = kind.lower()
-                    draft(name, sb_draft, run, location, jobs, wait, ui.pause if ui else pause_plain(say),
-                          kind=kind, notices=watchers[kind], failures=failures[kind])
-                    share(name)
-                    for (number, _), message in failures[kind].items():
-                        rejected.append(f"{kind} job {number}: {message}")
+                if not watched:
+                    continue
+                if wait <= 0:
+                    say(f"Not waiting for SB/BE numbers (--wait 0). Look them up later with: icerun --lookup {archive}")
+                    continue
+                say(f"Checking for SB/BE numbers for job(s) {', '.join(j.number for j in watched)} for up to {wait:g} seconds. "
+                    "Press Ctrl-C to skip the wait; the upload is already complete.")
+                try:
+                    verdicts = poll(run, watched, wait, say, ui.pause if ui else pause_plain(say))
+                except Stop as exc:
+                    say(f"note: SB/BE numbers not checked: {exc}")
+                    continue
+                write_drafts(verdicts)
+                for kind in dict.fromkeys(j.kind for j in watched):
+                    path = archive / f"draft-{kind.lower()}.html"
+                    if path.is_file():
+                        drafts[kind.lower()] = path
+                        share(kind.lower())
+                    else:
+                        say(f"note: {kind} table not created: not every {kind} number is registered yet; "
+                            f"run: icerun --recheck {archive}")
+                for v in verdicts:
+                    notice = (v.event or {}).get("message", "")
+                    if v.status == "not_filed":
+                        rejected.append(f"{v.job.kind} job {v.job.number}: NOT FILED by ICEGATE ({notice}). "
+                                        + (f"File it again with: icerun --refile {archive} --yes" if v.job.baselined
+                                         else "No baseline was recorded: check the notices by hand before filing again"))
+                    elif v.status == "failed":
+                        rejected.append(f"{v.job.kind} job {v.job.number}: FAILED with errors:\n      "
+                                        + "\n      ".join((v.event or {}).get("errors") or [notice])
+                                        + (f"\n    error table: {v.draft}" if v.draft else ""))
+                    elif v.status in ("multiple", "pending"):
+                        say(f"note: {v.job.kind} job {v.job.number}: {v.note}")
     except Stop as exc:
         wrap_up()
         raise Stop(f"{exc}\nAlready submitted in this run: {', '.join(submitted) or 'nothing'}") from None
     wrap_up()
     if rejected:
-        raise Stop("ICEGATE reported a problem with the upload; fix the file and file it again only after "
-                   "checking the portal:\n  " + "\n  ".join(rejected))
+        raise Stop("ICEGATE reported a problem with the upload:\n  " + "\n  ".join(rejected))
     return 0
 
 
@@ -1120,38 +1590,25 @@ def completed_runs(folder: Path) -> list[Path]:
 
 def recheck(folder: Path, *, run: Runner, say: Callable[[str], None], wait: float = 0,
             table_name: str = "all") -> int:
-    """Restore saved tables or look up a missing SB number without signing or uploading."""
+    """Restore saved tables or look up missing SB/BE numbers without signing or uploading."""
     archive = folder
     if (archive / "Done").is_dir():
         raise Stop("provide the specific completed run folder inside Done")
     say(f"Completed run: {archive}")
-    for kind in ("SB", "BE"):
-        name = kind.lower()
-        path = archive / f"draft-{name}.html"
-        if table_name not in ("all", name) or path.exists():
-            continue
-        files = sorted(p for p in archive.iterdir() if p.is_file() and not p.is_symlink()
-                       and p.suffix.lower() == f".{name}" and p.stem.lower().endswith("_signed"))
-        if not files:
-            continue
-        locations = {sb_location(p, kind) for p in files}
-        jobs = [sb_job(p, kind) for p in files]
-        if len(locations) != 1 or None in locations or None in jobs:
-            raise Stop(f"cannot read the location, job number and date from every archived {kind} file")
-        location = locations.pop()
-        say(f"Looking up {len(jobs)} {kind} job(s); no files will be uploaded.")
-        failed: dict[tuple[str, str], str] = {}
+    jobs, _ = run_jobs(archive, str(archive)) if RUN_NAME.fullmatch(archive.name) else ([], [])
+    todo = [j for j in jobs if table_name in ("all", j.kind.lower()) and not (archive / f"draft-{j.kind.lower()}.html").exists()]
+    if todo:
+        say(f"Looking up {len(todo)} job(s); no files will be uploaded.")
         try:
-            body = sb_draft(run, location, jobs, wait, pause_plain(say), kind=kind, failures=failed,
-                            notices=notice_watcher(run, location, jobs, say, []))
-            path.write_text(body, encoding="utf-8")
-        except NotYet as exc:
-            say(f"{kind} table unavailable: {exc}. ICEGATE has accepted the filing for processing, but the "
-                f"{kind} number only appears once it is registered; run this recheck again later.")
-        except (Stop, OSError, ValueError) as exc:
-            say(f"{kind} table unavailable: {exc}")
-        for (number, _), message in failed.items():
-            say(f"{kind} job {number}: {message}")
+            verdicts = poll(run, todo, wait, say, pause_plain(say))
+        except Stop as exc:
+            say(f"numbers unavailable: {exc}")
+        else:
+            write_drafts(verdicts)
+            for v in verdicts:
+                say(f"{v.job.kind} job {v.job.number}: {v.status}" + (f" ({v.note})" if v.note else ""))
+                if v.status in PROBLEMS and v.event:
+                    say("    " + "\n    ".join(v.event.get("errors") or [v.event["message"]]))
     names = ("esanchit", "sb", "be") if table_name == "all" else (table_name,)
     shown = []
     for name in names:
@@ -1248,30 +1705,44 @@ def show_notifications(*, run: Runner, say: Callable[[str], None], days: int = 1
 
 
 def parse_days_value(val: str | int | None, default: int) -> int:
+    """`--days N`: a whole number of days, 1 being today, 2 today and yesterday."""
     if val is None:
         return default
-    if isinstance(val, int):
-        return val
-    s = str(val).strip().lower()
-    if s in ("today", "day", "1"):
-        return 1
-    if s in ("week", "7"):
-        return 7
-    if s in ("month", "30"):
-        return 30
     try:
-        n = int(s)
-        if n < 1:
-            raise Stop("--days must be at least 1")
-        return n
+        n = int(str(val).strip())
     except ValueError:
-        raise Stop(f"invalid --days value: {val!r}; expected number of days (e.g. --days 2) or 'today', 'week', 'month'")
+        raise Stop(f"invalid --days value: {val!r}; expected a whole number of days (e.g. --days 2)") from None
+    if n < 1:
+        raise Stop("--days must be at least 1")
+    return n
+
+
+def filter_rows(rows: list, *, job: str | None = None, loc: str | None = None) -> list[dict]:
+    """Narrow one e-copy fetch locally. A job number matches exactly; failing that, with a two-digit year suffix."""
+    rows = [r for r in rows if isinstance(r, dict)]
+    if loc:
+        rows = [r for r in rows if str(r.get("location") or "").casefold() == loc.casefold()]
+    if job:
+        number = job.strip()
+        exact = [r for r in rows if str(r.get("jobNumber")) == number]
+        rows = exact or [r for r in rows if re.fullmatch(rf"{re.escape(number)}\d{{2}}", str(r.get("jobNumber")))]
+    return rows
+
+
+def listing_table(kind: str, rows: list[dict]) -> str:
+    cell = lambda row, key: "-" if not str(row.get(key) or "").strip() or row.get(key) == "-" else _show_date(row[key])  # noqa: E731
+    body = [[str(r.get("jobNumber", "")), str(r.get("docNumber") or "-"), cell(r, "docDate"), str(r.get("location") or ""),
+             cell(r, "jobDate")] for r in rows]
+    if not body:
+        return f"no {kind} records match"
+    return plain_table(table(["Job No", f"{kind} Number", f"{kind} Date", "Location", "Job Date"], body))
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="icerun",
         description="Sign, upload, and track customs filings, review run history, and check ICEGATE portal status.",
+        allow_abbrev=False,  # `--day` or `--not` must not silently mean `--days` or `--notices`
     )
     parser.add_argument("folder_or_command", nargs="?", default=None,
                         help="folder to process, or command ('check', 'history')")
@@ -1292,24 +1763,37 @@ def main(argv: list[str] | None = None) -> int:
                               help="show tables from a specific completed run without uploading")
     history_mode.add_argument("--notices", action="store_true",
                               help="show ICEGATE notifications without uploading")
+    history_mode.add_argument("--lookup", nargs="+", metavar="RUN_DIR",
+                              help="ONE login for every job of these Done/<timestamp> runs: one JSON line per job "
+                                   "(found / pending / not_filed / not_received / failed), missing draft tables written")
+    history_mode.add_argument("--drafts", nargs="+", metavar="DIR",
+                              help="read only: one JSON line per reply table (draft-*.html) of these job folders "
+                                   "(holding Done/) or completed runs: {run, kind, draft}")
+    history_mode.add_argument("--parse-response", metavar="FILE",
+                              help="read only, offline: the errors or numbers in an .ack/.nak result file ICEGATE mailed; "
+                                   "one JSON line {type, doc, jobs: [{location, job, job_date, number, date, errors}]}")
+    history_mode.add_argument("--token", action="store_true",
+                              help="read only: is the DSC token plugged in? One JSON line, exit 0 when present, 1 when not")
+    history_mode.add_argument("--refile", metavar="RUN_DIR",
+                              help="upload the archived signed SB/BE of this run again, once, only when ICEGATE's newest "
+                                   "notice says it was not filed (needs --yes; --dry-run to preview)")
 
     parser.add_argument("--table", choices=("all", "esanchit", "sb", "be"), default="all",
                         help="table to show and copy with history, or document type filter")
-    parser.add_argument("--days", type=str, default=None,
-                        help="filter by days (e.g. --days 2, --days 7, or 'today', 'week', 'month')")
-    parser.add_argument("--today", "--day", dest="time_preset", action="store_const", const=1,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--week", dest="time_preset", action="store_const", const=7,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--month", dest="time_preset", action="store_const", const=30,
-                        help=argparse.SUPPRESS)
+    parser.add_argument("--days", type=str, default=None, metavar="N",
+                        help="check window in days: --days 1 is today (the default), --days 2 today and yesterday")
     parser.add_argument("--raw", action="store_true",
                         help="show raw notification list instead of parsed filing events")
+    parser.add_argument("--job", metavar="N", help="with --sb/--be: only this job number (filtered locally)")
+    parser.add_argument("--loc", metavar="CODE", help="with --sb/--be: only this customs location (filtered locally)")
     parser.add_argument("--sb", action="store_true", help="check Shipping Bills")
     parser.add_argument("--be", action="store_true", help="check Bills of Entry")
-    parser.add_argument("--json", action="store_true", help="machine-readable JSON output")
+    parser.add_argument("--json", action="store_true",
+                        help="machine-readable output. Filing a folder: narration goes to stderr and stdout is one final "
+                             "JSON line {ok, runs: [{dir, kind, files, draft}]} (needs --yes)")
     parser.add_argument("--wait", type=float, default=None, metavar="SECONDS",
-                        help="wait for SB numbers (default: 600 seconds for upload, 0 for history)")
+                        help="seconds to wait for SB/BE numbers after uploading (default 600; 0 uploads and archives only, no check at all); "
+                             "with --recheck, how long to keep looking (default 0: one look)")
     parser.add_argument("--type", "--doc-type", dest="doc_type", default=None,
                         help="document code applied to every file")
     parser.add_argument("--doc-type-map", action="append", default=[],
@@ -1322,15 +1806,57 @@ def main(argv: list[str] | None = None) -> int:
         second = (args.sub_target or "").strip()
         cmd_lower = first.lower()
 
+        # 0. LOOKUP / REFILE ROUTES (one run folder each; no folder to sign)
+        if args.lookup:
+            if first or second or args.dry_run or args.no_sign or args.yes:
+                raise Stop("--lookup takes only run folders (and --json); nothing is signed or uploaded")
+            return lookup(args.lookup, run=client_runner(), say=lambda text: print(text, file=sys.stderr, flush=True),
+                          emit=lambda text: print(text, flush=True))
+        if args.parse_response:
+            if first or second or args.dry_run or args.no_sign or args.yes:
+                raise Stop("--parse-response takes only the file")
+            out = client_runner()(["parse-response", str(Path(args.parse_response).expanduser().resolve()), "--json"])
+            if out.returncode:
+                raise Stop((out.stderr or out.stdout).strip().removeprefix("error: ") or "cannot read the file")
+            print(out.stdout.strip(), flush=True)
+            return 0
+        if args.token:
+            if first or second or args.dry_run or args.no_sign or args.yes:
+                raise Stop("--token takes no other arguments")
+            return token(emit=lambda text: print(text, flush=True))
+        if args.drafts:
+            if first or second or args.dry_run or args.no_sign or args.yes:
+                raise Stop("--drafts takes only folders (and --json); nothing is signed or uploaded")
+            return list_drafts(args.drafts, emit=lambda text: print(text, flush=True))
+        if args.refile:
+            if first or second or args.no_sign:
+                raise Stop("--refile takes one run folder, --yes and --dry-run only")
+            return refile(Path(args.refile).expanduser().resolve(), run=client_runner(), say=say,
+                          yes=args.yes, dry_run=args.dry_run)
+
         # 1. CHECK ROUTE
         is_notices_explicit = args.notices or (cmd_lower in ("notices", "notifications"))
         is_check_cmd = (cmd_lower == "check")
-        is_portal_shortcut = (args.sb or args.be) and not is_notices_explicit and not first
+        first_is_folder = bool(first) and Path(first).expanduser().is_dir()
+        is_portal_shortcut = (args.sb or args.be) and not is_notices_explicit and not first_is_folder
 
         is_check = is_check_cmd or is_notices_explicit or is_portal_shortcut
         if is_check:
             if args.dry_run or args.no_sign or args.yes:
                 raise Stop("check commands cannot be combined with --dry-run, --no-sign or --yes")
+            if (args.job or args.loc) and (args.notices or cmd_lower in ("notices", "notifications")):
+                raise Stop("--job and --loc filter --sb/--be listings, not notices")
+
+            # Only `check [TARGET]` and `notices` take words. Anything else left over is a typo (e.g. `--notices 2`),
+            # not something to ignore; a folder beside --notices is the one tolerated legacy form.
+            if is_check_cmd:
+                leftover = []
+            elif cmd_lower in ("notices", "notifications"):
+                leftover = [second] if second else []
+            else:
+                leftover = [w for w in (first, second) if w and not (w == first and first_is_folder)]
+            if leftover:
+                raise Stop(f"unexpected argument: {leftover[0]!r}")
 
             target = "notifications"
             sub_lower = second.lower()
@@ -1356,12 +1882,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise Stop("cannot specify both --sb and --be")
                 target = "sb" if args.sb else "be"
 
-            if args.days is not None:
-                days = parse_days_value(args.days, default=1)
-            elif args.time_preset is not None:
-                days = args.time_preset
-            else:
-                days = 1
+            days = parse_days_value(args.days, default=1)
 
             if target == "notifications":
                 return show_notifications(
@@ -1375,18 +1896,19 @@ def main(argv: list[str] | None = None) -> int:
                     as_json=args.json,
                 )
             else:
+                local = bool(args.job or args.loc)
                 argv = ["ecopy", target]
-                if days == 1:
-                    argv.append("--today")
-                elif days == 7:
-                    argv.append("--week")
-                elif days == 30:
-                    argv.append("--month")
-                else:
-                    argv.extend(["--days", str(days)])
-                if args.json:
+                argv.extend(["--days", str(days)])
+                if args.json or local:
                     argv.append("--json")
                 out = client_runner()(argv)
+                if local and not out.returncode:
+                    try:
+                        rows = filter_rows(json.loads(out.stdout), job=args.job, loc=args.loc)
+                    except ValueError:
+                        raise Stop("the portal search returned invalid JSON") from None
+                    say(json.dumps(rows, indent=2, ensure_ascii=False) if args.json else listing_table(target.upper(), rows))
+                    return 0
                 if out.stdout:
                     say(out.stdout.rstrip())
                 if out.stderr:
@@ -1431,8 +1953,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         if cmd_lower != "file" and second:
             raise Stop(f"unexpected argument: {second!r}")
-        if args.sb or args.be or args.notices or args.days is not None or args.time_preset is not None or args.raw or args.json:
-            raise Stop("check options (--sb, --be, --notices, --days, --today, --week, --month, --raw, --json) cannot be used when filing a folder")
+        if (args.sb or args.be or args.notices or args.days is not None or args.raw
+                or args.job or args.loc):
+            raise Stop("check options (--sb, --be, --notices, --days, --raw, --job, --loc) "
+                       "cannot be used when filing a folder")
         if args.wait is not None and (not math.isfinite(args.wait) or args.wait < 0):
             raise Stop("--wait must be a finite number of seconds, zero or greater")
         folder = Path(folder_str).expanduser().resolve()
@@ -1441,11 +1965,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.table != "all":
             raise Stop("--table requires check or history")
         signer = Path(args.signer).expanduser()
-        return run_folder(folder, run=client_runner(), say=say,
-                          ui=Prompts() if sys.stdin.isatty() else None, dry_run=args.dry_run, yes=args.yes,
-                          signer=None if args.no_sign or not signer.is_file() else signer,
-                          wait=args.wait if args.wait is not None else 600,
-                          doc_type=args.doc_type, doc_type_map=args.doc_type_map)
+        report: dict | None = {"runs": []} if args.json else None  # --json: narration to stderr, one JSON line to stdout
+        try:
+            code = run_folder(folder, run=client_runner(),
+                              say=(lambda text: print(text, file=sys.stderr, flush=True)) if args.json else say,
+                              ui=Prompts() if sys.stdin.isatty() and not args.json else None,
+                              dry_run=args.dry_run, yes=args.yes,
+                              signer=None if args.no_sign or not signer.is_file() else signer,
+                              wait=args.wait if args.wait is not None else 600,
+                              doc_type=args.doc_type, doc_type_map=args.doc_type_map, report=report)
+        except Stop as exc:
+            if report is not None:  # what was already uploaded still matters to the caller
+                print(json.dumps({"ok": False, "error": str(exc), "runs": report["runs"]}, ensure_ascii=False), flush=True)
+            raise
+        if report is not None:
+            print(json.dumps({"ok": code == 0, "runs": report["runs"]}, ensure_ascii=False), flush=True)
+        return code
     except Stop as exc:
         print(f"stopped: {exc}", file=sys.stderr)
         return 1

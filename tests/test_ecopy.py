@@ -188,3 +188,87 @@ def test_download_cli_does_not_create_file_after_portal_error(tmp_path, monkeypa
 def test_download_409_says_portal_is_still_retrieving():
     with pytest.raises(IcegateError, match="retry in about 60 minutes"):
         ECopyClient(FakeSession({}, status=409)).download_signed("1234567890123456", "USER")
+
+
+def test_lookup_logs_in_once_and_returns_every_kind_with_the_events(tmp_path, monkeypatch, capsys):
+    import json
+
+    monkeypatch.setenv("ICEGATE_USERNAME", "test")
+    monkeypatch.setenv("ICEGATE_PASSWORD", "test")
+    logins, searches = [], []
+    monkeypatch.setattr(cli.Context, "authenticate", lambda ctx: logins.append(1))
+    monkeypatch.setattr(ECopyClient, "search_by_date",
+                        lambda self, kind, start, end: searches.append((kind, start, end)) or [{"kind": kind, "irn": "9", "userId": "U"}])
+    note = {"createdDate": "27.11.2026", "message": '"Your shipping bill filing with job no. 7 dated 26112026 has been rejected.'}
+    monkeypatch.setattr(cli.NotificationClient, "list", lambda self, kind="E": [note])
+    assert cli.main(["ecopy", "lookup", "--window", "SB=2026-11-20", "--window", "BE=2026-11-18", "--window", "SB=2026-11-22",
+                     "--events", "--state-dir", str(tmp_path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert len(logins) == 1 and [s[0] for s in searches] == ["SB", "BE"]
+    assert searches[0][1] == date(2026, 11, 20) and searches[0][2] == searches[1][2] == date.fromisoformat(out["today"])
+    assert set(out["ecopy"]) == {"SB", "BE"} and out["events_error"] is None
+    assert out["events"][0]["problem"] == "not_filed" and out["events"][0]["job"] == "7"
+    assert ECopyCache(tmp_path, "test").user_id("9") == "U"
+
+
+def test_lookup_reports_unreadable_notices_without_failing_the_search(tmp_path, monkeypatch, capsys):
+    import json
+
+    monkeypatch.setenv("ICEGATE_USERNAME", "test")
+    monkeypatch.setenv("ICEGATE_PASSWORD", "test")
+    monkeypatch.setattr(cli.Context, "authenticate", lambda ctx: None)
+    monkeypatch.setattr(ECopyClient, "search_by_date", lambda self, kind, start, end: [])
+    def broken(self, kind="E"):
+        raise IcegateError("notifications request failed with HTTP 500")
+    monkeypatch.setattr(cli.NotificationClient, "list", broken)
+    assert cli.main(["ecopy", "lookup", "--window", "SB=2026-11-20", "--events", "--state-dir", str(tmp_path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["events"] is None and "HTTP 500" in out["events_error"] and out["ecopy"] == {"SB": []}
+
+
+def test_lookup_reads_job_status_once_per_location_and_nulls_what_it_cannot_read(tmp_path, monkeypatch, capsys):
+    import json
+
+    monkeypatch.setenv("ICEGATE_USERNAME", "test")
+    monkeypatch.setenv("ICEGATE_PASSWORD", "test")
+    logins, asked = [], []
+    monkeypatch.setattr(cli.Context, "authenticate", lambda ctx: logins.append(1))
+    monkeypatch.setattr(ECopyClient, "search_by_date", lambda self, kind, start, end: [])
+
+    def enquiry(self, kind, location):
+        asked.append((kind, location))
+        if location == "INPPG6":
+            raise IcegateError("job status enquiry failed with HTTP 500")
+        return [{"jobNo": "1"}]
+    monkeypatch.setattr(cli.JobStatusClient, "enquiry", enquiry)
+    assert cli.main(["ecopy", "lookup", "--window", "SB=2026-11-20", "--job-status", "SB:inmbd6", "--job-status", "SB:INMBD6",
+                     "--job-status", "BE:INPPG6", "--state-dir", str(tmp_path)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert len(logins) == 1 and asked == [("SB", "INMBD6"), ("BE", "INPPG6")]
+    assert out["job_status"] == {"SB:INMBD6": [{"jobNo": "1"}], "BE:INPPG6": None}
+    assert cli.main(["ecopy", "lookup", "--window", "SB=2026-11-20", "--job-status", "XX:A", "--state-dir", str(tmp_path)]) == 1
+
+
+def test_lookup_needs_something_to_look_up(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ICEGATE_USERNAME", "test")
+    monkeypatch.setenv("ICEGATE_PASSWORD", "test")
+    assert cli.main(["ecopy", "lookup", "--state-dir", str(tmp_path)]) == 1
+    assert cli.main(["ecopy", "lookup", "--window", "XX=2026-11-20", "--state-dir", str(tmp_path)]) == 1
+
+
+def test_search_cache_is_one_file_that_is_not_rewritten_when_nothing_changed(tmp_path):
+    cache = ECopyCache(tmp_path, "A")
+    rows = [{"irn": str(n), "userId": "U"} for n in range(50)]
+    cache.remember(rows)
+    assert [p.name for p in cache.directory.iterdir()] == ["index.json"]
+    before = cache.index.stat().st_mtime_ns
+    cache.remember(rows)
+    assert cache.index.stat().st_mtime_ns == before
+    assert cache.user_id("49") == "U"
+
+
+def test_cache_still_reads_files_left_by_an_older_version(tmp_path):
+    cache = ECopyCache(tmp_path, "A")
+    cache.directory.mkdir(parents=True)
+    (cache.directory / cache._key("77")).write_text("OLD-USER")
+    assert cache.user_id("77") == "OLD-USER"

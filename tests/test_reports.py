@@ -111,3 +111,19 @@ def test_enquiry_rejects_bad_input_and_response():
         EnquiryClient(FakeSession([1])).shipping_bill("INMBD6", "1", date(2026, 9, 14))
     with pytest.raises(IcegateError):
         EnquiryClient(FakeSession({}, status=500)).shipping_bill("INMBD6", "1", date(2026, 9, 14))
+
+
+def test_job_status_enquiry_posts_the_location_and_returns_the_rows():
+    session = FakeSession([{"jobNo": "1047"}, "junk"])
+    assert JobStatusClient(session).enquiry("SB", "INMBD6") == [{"jobNo": "1047"}]
+    _, url, kwargs = session.calls[0]
+    assert url.endswith("/enquiry/docenquiry/jobstatus/sb")
+    assert kwargs["json_body"] == {"icegateId": "TEST", "roleId": 3, "receiverId": "INMBD6"}
+
+
+def test_job_status_enquiry_no_record_is_empty_but_other_errors_raise():
+    assert JobStatusClient(FakeSession({"message": "No Record Found !!"}, status=400)).enquiry("BE", "INPPG6") == []
+    with pytest.raises(IcegateError):
+        JobStatusClient(FakeSession({"message": "boom"}, status=400)).enquiry("BE", "INPPG6")
+    with pytest.raises(IcegateError):
+        JobStatusClient(FakeSession(status=500)).enquiry("SB", "INMBD6")

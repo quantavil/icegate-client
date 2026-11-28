@@ -2,9 +2,10 @@ import importlib.machinery
 import importlib.util
 import json
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -23,14 +24,31 @@ SB_ROW = {"jobNumber": "893", "location": "INMBD6", "docNumber": "8176055", "doc
 
 BE_FILE = "HREC\x1dZZ\x1dINHDD6\r\n<TABLE>BE\r\nF\x1dINHDD6\x1d113\x1d20261105\x1d\x1d\x1dH\x1d\r\n<END-BE>\r\n"
 BE_ROW = {"jobNumber": "113", "jobDate": "05-11-2026", "location": "INHDD6", "docNumber": "4941305", "docDate": "-"}
-REJECTED = {"outcome": "rejected", "doc": "BE", "job": "113", "date": "2026-11-05", "location": None,
-            "detail": "error code 820_SUPPDOCS", "message": "Your bill of entry filing with job no. 113 dated 05112026 has been rejected."}
+NOW = datetime.now(ZoneInfo("Asia/Kolkata"))
+CREATED = NOW.strftime("%d.%m.%Y")  # notices carry a day, in this format
+# A rejection with error codes ("failed") and a bare rejection ("not_filed"), as parse_notification gives them.
+REJECTED = {"outcome": "rejected", "doc": "BE", "job": "113", "date": "2026-11-05", "location": None, "created": CREATED,
+            "detail": "error code 820_SUPPDOCS", "problem": "failed", "errors": ["820_SUPPDOCS"],
+            "message": "Your bill of entry filing with job no. 113 dated 05112026 has been rejected. Error code: 820_SUPPDOCS"}
+NOT_FILED = {**REJECTED, "detail": "", "problem": "not_filed", "errors": [],
+             "message": "Your bill of entry filing with job no. 113 dated 05112026 has been rejected."}
+ACCEPTED = {"outcome": "submitted", "doc": "BE", "job": "113", "date": "2026-11-05", "location": None, "created": CREATED,
+            "detail": "", "problem": None, "errors": [], "message": "Your bill of entry filing with job no 113 dated 20261105 has been successfully submitted."}
 
 SB_FILE = "HREC\x1dZZ\x1dINMBD6\r\n<TABLE>SB\r\nF\x1dinmbd6\x1d893\x1d20261030\x1d\r\n<END-SB>\r\n"
 
 
+sleeps: list[float] = []
+
+
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
+    clock = [0.0]  # waiting costs no real time: a sleep only moves this clock
+    def sleep(seconds):
+        clock[0] += seconds
+        sleeps.append(seconds)
+    sleeps.clear()
+    monkeypatch.setattr(mod, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
     monkeypatch.setattr(mod, "STATE", tmp_path / "state")
     monkeypatch.setattr(mod, "copy_html", lambda text: True)
     monkeypatch.setattr(mod, "prepare_pdf", lambda path, say: None)  # the fixtures are not real PDFs
@@ -40,10 +58,12 @@ class FakeRun:
     """Stands in for the client; every argv must parse with the client's real parser."""
 
     def __init__(self, tmp_path, fail=None, fail_filing=False, rows=None, before=(), after=(), unreadable=0,
-                 filing_exit=1):
+                 filing_exit=1, job_status=None):
+        self.job_status = job_status  # {"SB:LOC": rows | None}; a requested location missing here has no rows
         self.calls, self.fail, self.fail_filing, self.rows, self.tmp = [], fail, fail_filing, rows, tmp_path
         self.filing_exit = filing_exit
         self.before, self.after, self.polled, self.unreadable = list(before), list(after), 0, unreadable
+        self.lookups: list[list[str]] = []
 
     def __call__(self, argv):
         self.calls.append(argv)
@@ -59,12 +79,22 @@ class FakeRun:
             if "--confirm" not in argv:
                 return ok("challenge   FILE 1 abcdefabcdef\n")
             return ok("", self.filing_exit, "error: portal said no\n") if self.fail_filing else ok("accepted\n")
-        if argv[0] == "notifications":
-            self.polled += 1  # the first call is the baseline taken before uploading
-            if self.polled <= self.unreadable:
-                return ok("", 1, "boom")
-            return ok(json.dumps(self.before if self.polled == 1 else self.after + self.before))
-        return ok(json.dumps(self.rows if self.rows is not None else [SB_ROW]))
+        if argv[:2] == ["ecopy", "lookup"]:  # ONE client call: the searches and the notices
+            self.lookups.append(argv)
+            kinds = [argv[i + 1].split("=")[0] for i, a in enumerate(argv) if a == "--window"]
+            rows = self.rows if self.rows is not None else [SB_ROW]
+            out = {"today": NOW.date().isoformat(), "ecopy": {kind: rows for kind in kinds}, "events": None, "events_error": None}
+            if "--events" in argv:
+                self.polled += 1  # with the default wait the first one is the baseline taken before uploading
+                if self.polled <= self.unreadable:
+                    out["events_error"] = "boom"
+                else:
+                    out["events"] = self.before if self.polled == 1 else self.after + self.before
+            wanted = [argv[i + 1] for i, a in enumerate(argv) if a == "--job-status"]
+            if wanted:
+                out["job_status"] = {key: (self.job_status or {}).get(key, []) for key in wanted}
+            return ok(json.dumps(out))
+        return ok(json.dumps([]))
 
 
 class FakeUI:
@@ -91,6 +121,7 @@ class FakeUI:
 
     def pause(self, message, seconds):
         self.pauses.append(message)
+        mod.time.sleep(seconds)
 
 
 def make(tmp_path, *names, signed=True):
@@ -119,6 +150,7 @@ def fake_signer(tmp_path, code=0):
 
 def go(folder, tmp_path, run, **kw):
     kw.setdefault("ui", FakeUI())
+    kw.setdefault("wait", 600)
     return mod.run_folder(folder, run=run, say=kw.pop("said", lambda _: None), **kw)
 
 
@@ -270,7 +302,7 @@ def test_sb_not_registered_yet_is_a_note_not_a_failure(tmp_path):
     folder = make(tmp_path, "893.sb")
     said = []
     assert go(folder, tmp_path, FakeRun(tmp_path, rows=[]), said=said.append) == 0
-    assert any("no SB found yet" in s for s in said)
+    assert any("is registered yet" in s for s in said)
     assert not any(p.name.startswith("draft-") for p in next((folder / "Done").iterdir()).iterdir())
 
 
@@ -379,47 +411,42 @@ def test_sb_job_is_read_from_file_when_filename_is_not_job_number(tmp_path):
     assert (next((folder / "Done").iterdir()) / "draft-sb.html").exists()
 
 
-def test_sb_lookup_searches_the_range_and_rejects_incomplete_results(tmp_path):
-    run = FakeRun(tmp_path, rows=[{**SB_ROW, "docNumber": ""}])
-    with pytest.raises(mod.NotYet):
-        mod.sb_rows(run, "INMBD6", [("893", "2026-10-30")], today=date(2026, 11, 2))
-    assert run.calls[0][2:] == ["SB", "--from", "2026-10-30", "--to", "2026-11-02", "--json"]
+def test_match_rows_wants_a_registered_number_and_date(tmp_path):
+    match = lambda rows, **kw: mod.match_rows(rows, kw.get("kind", "SB"), "INMBD6", "893", "2026-10-30", date(2026, 11, 2))  # noqa: E731
+    assert match([SB_ROW]) == [SB_ROW]
+    assert match([{**SB_ROW, "docNumber": ""}]) == []
     for dash in ({"docDate": "-"}, {"docDate": ""}, {"docNumber": "-"}):
-        with pytest.raises(mod.NotYet):
-            mod.sb_rows(FakeRun(tmp_path, rows=[{**SB_ROW, **dash}]), "INMBD6", [("893", "2026-10-30")])
+        assert match([{**SB_ROW, **dash}]) == []
 
 
-def test_sb_lookup_rejects_a_job_dated_before_the_file(tmp_path):
-    run = FakeRun(tmp_path, rows=[{**SB_ROW, "jobDate": "29-10-2026"}])
-    with pytest.raises(mod.NotYet):
-        mod.sb_rows(run, "INMBD6", [("893", "2026-10-30")])
+def test_match_rows_rejects_a_job_dated_before_the_file():
+    assert mod.match_rows([{**SB_ROW, "jobDate": "29-10-2026"}], "SB", "INMBD6", "893", "2026-10-30", date(2026, 11, 2)) == []
 
 
-def test_sb_lookup_finds_a_job_the_portal_dated_after_the_file(tmp_path):
+def test_match_rows_finds_a_job_the_portal_dated_after_the_file():
     """File says 2026-11-13; ICEGATE processed it on the 14th and dates the e-copy job that day."""
     row = {**SB_ROW, "jobNumber": "788", "jobDate": "14-11-2026", "docDate": "14-11-2026"}
-    run = FakeRun(tmp_path, rows=[row, {**row, "jobNumber": "789"}])
-    assert mod.sb_rows(run, "INMBD6", [("788", "2026-11-13")], today=date(2026, 11, 16)) == [row]
-    assert len(run.calls) == 1  # one search for every job, not one per job and date
+    assert mod.match_rows([row, {**row, "jobNumber": "789"}], "SB", "INMBD6", "788", date(2026, 11, 13), date(2026, 11, 16)) == [row]
 
 
-def test_sb_lookup_ignores_other_locations_and_future_dates(tmp_path):
+def test_match_rows_ignores_other_locations_and_future_dates():
     other = {**SB_ROW, "location": "INSTT6"}
     later = {**SB_ROW, "jobDate": "20-11-2026"}
-    with pytest.raises(mod.NotYet):
-        mod.sb_rows(FakeRun(tmp_path, rows=[other, later]), "INMBD6", [("893", "2026-11-10")], today=date(2026, 11, 16))
+    assert mod.match_rows([other, later], "SB", "INMBD6", "893", "2026-11-10", date(2026, 11, 16)) == []
 
 
-def test_be_lookup_accepts_a_dash_date_and_a_later_job_date(tmp_path):
+def test_match_rows_accepts_a_be_with_a_dash_date_and_a_later_job_date():
     row = {**BE_ROW, "jobDate": "09-11-2026"}
-    assert mod.sb_rows(FakeRun(tmp_path, rows=[row]), "INHDD6", [("113", "2026-11-05")], "BE",
-                       today=date(2026, 11, 16)) == [row]
+    assert mod.match_rows([row], "BE", "INHDD6", "113", "2026-11-05", date(2026, 11, 16)) == [row]
+    assert mod.match_rows([row], "SB", "INHDD6", "113", "2026-11-05", date(2026, 11, 16)) == []  # an SB needs a real date
 
 
-def test_sb_lookup_two_matches_is_ambiguous(tmp_path):
-    run = FakeRun(tmp_path, rows=[SB_ROW, {**SB_ROW, "docNumber": "8176056"}])
-    with pytest.raises(mod.Stop, match="multiple"):
-        mod.sb_rows(run, "INMBD6", [("893", "2026-10-28")], today=date(2026, 10, 28))
+def test_match_rows_two_matches_are_both_returned_and_the_plain_number_beats_the_suffixed():
+    twin = {**SB_ROW, "docNumber": "8176056"}
+    assert mod.match_rows([SB_ROW, twin], "SB", "INMBD6", "893", "2026-10-28", date(2026, 10, 28)) == [SB_ROW, twin]
+    suffixed = {**SB_ROW, "jobNumber": "89326"}
+    assert mod.match_rows([suffixed], "SB", "INMBD6", "893", "2026-10-28", date(2026, 10, 28)) == [suffixed]
+    assert mod.match_rows([suffixed, SB_ROW], "SB", "INMBD6", "893", "2026-10-28", date(2026, 10, 28)) == [SB_ROW]
 
 
 def test_recheck_recovers_sb_table_from_archived_file_without_upload(tmp_path, monkeypatch):
@@ -434,7 +461,7 @@ def test_recheck_recovers_sb_table_from_archived_file_without_upload(tmp_path, m
     assert mod.recheck(archive, run=run, say=said.append, wait=0) == 0
     assert "8176055" in "\n".join(said) and "8176055" in copied[0]
     assert (archive / "draft-sb.html").exists()
-    assert all(call[:2] == ["ecopy", "search"] or call[0] == "notifications" for call in run.calls)
+    assert [c[:2] for c in run.calls] == [["ecopy", "lookup"]]  # one client call, not a search plus notices
 
 
 def test_recheck_can_copy_either_saved_table(tmp_path, monkeypatch):
@@ -547,17 +574,17 @@ def test_icerun_check_command(tmp_path, monkeypatch, capsys):
     # 4. icerun check sb (defaults to today)
     res = mod.main(["check", "sb"])
     assert res == 0
-    assert calls[-1] == ["ecopy", "sb", "--today"]
+    assert calls[-1] == ["ecopy", "sb", "--days", "1"]
 
     # 5. icerun check sb --days 7
     res = mod.main(["check", "sb", "--days", "7"])
     assert res == 0
-    assert calls[-1] == ["ecopy", "sb", "--week"]
+    assert calls[-1] == ["ecopy", "sb", "--days", "7"]
 
     # 6. icerun check be --days 30
     res = mod.main(["check", "be", "--days", "30"])
     assert res == 0
-    assert calls[-1] == ["ecopy", "be", "--month"]
+    assert calls[-1] == ["ecopy", "be", "--days", "30"]
 
     # 7. icerun --notices (defaults to 1 day)
     res = mod.main(["--notices"])
@@ -574,10 +601,10 @@ def test_icerun_check_command(tmp_path, monkeypatch, capsys):
     assert res == 0
     assert calls[-1] == ["notifications", "--days", "1", "--events", "--doc", "SB"]
 
-    # 10. Backward compatibility: upload --sb --week
-    res = mod.main(["--sb", "--week"])
+    # 10. icerun --sb --days 7
+    res = mod.main(["--sb", "--days", "7"])
     assert res == 0
-    assert calls[-1] == ["ecopy", "sb", "--week"]
+    assert calls[-1] == ["ecopy", "sb", "--days", "7"]
 
     # 11. icerun check notices --sb (defaults to 1 day)
     res = mod.main(["check", "notices", "--sb"])
@@ -606,6 +633,47 @@ def test_icerun_check_command(tmp_path, monkeypatch, capsys):
     res = mod.main([str(folder), "typo_arg"])
     assert res == 1
     assert "unexpected argument: 'typo_arg'" in capsys.readouterr().err
+
+
+def test_icerun_days_flag_and_stray_words(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def fake_client_runner():
+        def run(argv):
+            calls.append(argv)
+            return type("Res", (), {"returncode": 0, "stdout": "OUT\n", "stderr": ""})()
+        return run
+    monkeypatch.setattr(mod, "client_runner", fake_client_runner)
+
+    assert mod.main(["--notices", "--days", "2"]) == 0
+    assert calls[-1] == ["notifications", "--days", "2", "--events"]
+    assert mod.main(["--notices"]) == 0
+    assert calls[-1] == ["notifications", "--days", "1", "--events"]
+    assert mod.main(["--sb", "--days", "3"]) == 0
+    assert calls[-1] == ["ecopy", "sb", "--days", "3"]
+    assert mod.main(["check", "be", "--days", "2"]) == 0
+    assert calls[-1] == ["ecopy", "be", "--days", "2"]
+    assert mod.main(["notices", "--days", "2"]) == 0
+    assert calls[-1] == ["notifications", "--days", "2", "--events"]
+
+    n = len(calls)
+    # --day and the --today/--week/--month presets are gone; no flag may be abbreviated (--not is not --notices)
+    for bad in (["--notices", "--day", "2"], ["--notices", "--day"], ["--not"], ["--sb", "--da", "2"],
+                ["--notices", "--today"], ["--sb", "--week"], ["--be", "--month"]):
+        with pytest.raises(SystemExit) as exc:
+            mod.main(bad)
+        assert exc.value.code == 2
+        assert "unrecognized arguments" in capsys.readouterr().err
+    # --days takes a positive whole number only
+    for bad in ("week", "today", "0", "-1", "1.5"):
+        assert mod.main(["--notices", f"--days={bad}"]) == 1
+        assert "--days" in capsys.readouterr().err
+    # a stray word beside a check route is refused, never ignored
+    for bad, word in ((["--notices", "--days", "1", "2"], "'2'"), (["--sb", "--days", "1", "2"], "'2'"),
+                      (["--be", "--days", "2", "x"], "'x'"), (["notices", "2"], "'2'"), (["--notices", "a", "b"], "'a'")):
+        assert mod.main(bad) == 1
+        assert f"unexpected argument: {word}" in capsys.readouterr().err
+    assert len(calls) == n  # nothing reached the client
 
 
 def test_icerun_history_combines_multiple_runs(tmp_path, capsys):
@@ -674,7 +742,7 @@ class LateSB(FakeRun):
         self.searches = 0
 
     def __call__(self, argv):
-        if argv[:2] == ["ecopy", "search"]:
+        if argv[:2] == ["ecopy", "lookup"] and "--window" in argv:
             self.searches += 1
             self.rows = [SB_ROW] if self.searches >= 3 else []
         return super().__call__(argv)
@@ -686,12 +754,12 @@ def test_sb_number_found_under_year_suffixed_job_number(tmp_path):
 
     class Suffixed(FakeRun):
         def __call__(self, argv):
-            if argv[:2] == ["ecopy", "search"]:
+            if argv[:2] == ["ecopy", "lookup"]:
                 self.rows = [row]
             return super().__call__(argv)
 
     folder = make(tmp_path, "893.sb")
-    assert go(folder, tmp_path, Suffixed(tmp_path), wait=0) == 0
+    assert go(folder, tmp_path, Suffixed(tmp_path)) == 0
     assert "89326" in (next((folder / "Done").iterdir()) / "draft-sb.html").read_text()
 
 
@@ -703,19 +771,38 @@ def test_waits_for_the_sb_number_to_appear(tmp_path):
     assert (next((folder / "Done").iterdir()) / "draft-sb.html").exists()
 
 
-def test_waiting_without_a_terminal_uses_plain_sleep(tmp_path, monkeypatch):
-    sleeps = []
-    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+def test_waiting_without_a_terminal_uses_plain_sleep(tmp_path):
     run = LateSB(tmp_path)
     assert go(make(tmp_path, "893.sb"), tmp_path, run, ui=None, yes=True, wait=600) == 0
     assert sleeps == [mod.POLL_SECONDS] * 2
 
 
-def test_gives_up_waiting_after_the_limit(tmp_path):
+def test_gives_up_waiting_after_the_limit_with_one_lookup_per_round(tmp_path):
     folder = make(tmp_path, "893.sb")
-    said = []
-    assert go(folder, tmp_path, FakeRun(tmp_path, rows=[]), wait=0, said=said.append) == 0
-    assert any("no SB found yet" in s for s in said)
+    said, run = [], FakeRun(tmp_path, rows=[])
+    assert go(folder, tmp_path, run, wait=150, said=said.append) == 0
+    rounds = [c for c in run.lookups if "--window" in c]
+    assert len(rounds) == 4 and sleeps == [60, 60, 30]  # one client login per round, covering SB and BE together
+    assert any("is registered yet" in s and "icerun --recheck" in s for s in said)
+
+
+def test_wait_zero_uploads_and_archives_only(tmp_path):
+    folder, said = make(tmp_path, "893.sb", "113.be"), []
+    run = FakeRun(tmp_path)
+    assert go(folder, tmp_path, run, wait=0, ui=None, yes=True, said=said.append) == 0
+    assert run.lookups == [["ecopy", "lookup", "--events"]] and sleeps == []  # only the baseline, taken before the upload
+    archive = next((folder / "Done").iterdir())
+    assert any("--wait 0" in s and f"icerun --lookup {archive}" in s for s in said)
+    assert (archive / "893_Signed.sb").exists() and not list(archive.glob("draft-*"))
+
+
+def test_sb_and_be_are_checked_together_in_one_call_per_round(tmp_path):
+    folder = make(tmp_path, "893.sb", "113.be")
+    run = FakeRun(tmp_path, rows=[SB_ROW, BE_ROW])
+    assert go(folder, tmp_path, run) == 0
+    window_calls = [c for c in run.lookups if "--window" in c]
+    assert len(window_calls) == 1 and window_calls[0][2:] == ["--window", "BE=2026-11-05", "--window", "SB=2026-10-30", "--events"]
+    assert len(run.lookups) == 2  # the baseline (notices only) and the one round
 
 
 def test_portal_safe_names():
@@ -850,7 +937,7 @@ def test_same_original_is_not_signed_again_after_upload(tmp_path):
     (folder / "Commercial Invoice 1.pdf").write_text("Commercial Invoice 1.pdf")
     run = FakeRun(tmp_path)
     with pytest.raises(mod.Stop, match="already uploaded"):
-        go(folder, tmp_path, run, signer=fake_signer(tmp_path))
+        go(folder, tmp_path, run, ui=FakeUI(confirm=False), signer=fake_signer(tmp_path))  # the offer is declined
     assert run.calls == []
 
 
@@ -1077,21 +1164,22 @@ def test_be_number_is_looked_up_after_a_be_upload(tmp_path):
     folder = make(tmp_path, "113.be")
     run, said = FakeRun(tmp_path, rows=[BE_ROW]), []
     assert go(folder, tmp_path, run, said=said.append) == 0
-    search = next(c for c in run.calls if c[:2] == ["ecopy", "search"])
-    assert search[2:4] == ["BE", "--from"] and search[4] == "2026-11-05" and search[-1] == "--json"
+    search = next(c for c in run.lookups if "--window" in c)
+    assert search[2:] == ["--window", "BE=2026-11-05", "--events"]
     draft = (next((folder / "Done").iterdir()) / "draft-be.html").read_text()
     assert "4941305" in draft and "BE Number" in draft and "SB Number" not in draft
 
 
-def test_a_rejection_notice_stops_the_wait_and_is_reported(tmp_path, monkeypatch):
-    sleeps = []
-    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+def test_a_rejection_notice_stops_the_wait_and_is_reported(tmp_path):
     folder = make(tmp_path, "113.be")
     run, said = FakeRun(tmp_path, rows=[], after=[REJECTED]), []
     with pytest.raises(mod.Stop) as stopped:
         go(folder, tmp_path, run, ui=None, yes=True, wait=600, said=said.append)
     assert sleeps == [] and "BE job 113" in str(stopped.value) and "820_SUPPDOCS" in str(stopped.value)
-    assert (next((folder / "Done").iterdir()) / "113_Signed.be").exists()  # the upload itself stays recorded
+    assert "FAILED" in str(stopped.value)
+    archive = next((folder / "Done").iterdir())
+    assert (archive / "113_Signed.be").exists()  # the upload itself stays recorded
+    assert "820_SUPPDOCS" in (archive / "draft-error.html").read_text()
 
 
 def test_a_notice_from_before_the_upload_is_not_blamed_on_it(tmp_path):
@@ -1109,8 +1197,674 @@ def test_one_rejected_job_does_not_hide_the_others(tmp_path):
     assert "8176055" in (next((folder / "Done").iterdir()) / "draft-sb.html").read_text()
 
 
-def test_unreadable_baseline_disables_rejection_reports_instead_of_guessing(tmp_path):
+def test_unreadable_baseline_falls_back_to_the_upload_day_and_a_number_still_wins(tmp_path):
     folder, said = make(tmp_path, "113.be"), []
     run = FakeRun(tmp_path, rows=[BE_ROW], before=[REJECTED], unreadable=1)  # later reads would show an old rejection
     assert go(folder, tmp_path, run, said=said.append) == 0
-    assert any("could not read ICEGATE notifications" in s for s in said)
+    assert any("could not read ICEGATE notices" in s for s in said)
+
+
+# ------------------------------------------------------------------ --lookup, --refile, listing filters
+def archived(tmp_path, *names, sub="in", fake=None):
+    """A completed run (Done/<timestamp>) made by a wait-0 upload (which takes only the notices baseline)."""
+    folder = make(tmp_path / sub, *names)
+    assert go(folder, tmp_path, fake or FakeRun(tmp_path), wait=0, ui=None, yes=True) == 0
+    return next((folder / "Done").iterdir())
+
+
+def looked_up(runs, fake, **kw):
+    said, lines = [], []
+    code = mod.lookup([str(r) for r in runs], run=fake, say=said.append, emit=lines.append, **kw)
+    return code, [json.loads(line) for line in lines], said
+
+
+def test_lookup_reports_found_writes_the_draft_and_never_overwrites_it(tmp_path):
+    archive = archived(tmp_path, "893.sb")
+    run = FakeRun(tmp_path, rows=[SB_ROW])
+    code, out, _ = looked_up([archive], run)
+    assert code == 0 and len(run.lookups) == 1
+    [row] = out
+    assert row == {"run": str(archive), "file": "893_Signed.sb", "kind": "sb", "location": "INMBD6", "job": "893",
+                   "status": "found", "number": "8176055", "date": "28-10-2026", "draft": str(archive / "draft-sb.html"),
+                   "note": "", "notice": None, "errors": [], "refiled": False}
+    draft = archive / "draft-sb.html"
+    assert "8176055" in draft.read_text()
+    draft.write_text("hand edited")
+    _, out, _ = looked_up([archive], FakeRun(tmp_path, rows=[SB_ROW]))
+    assert draft.read_text() == "hand edited" and out[0]["status"] == "found" and "left as it is" in out[0]["note"]
+
+
+def test_lookup_pending_when_nothing_is_there_yet(tmp_path):
+    archive = archived(tmp_path, "893.sb")
+    code, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[]))
+    assert code == 0 and row["status"] == "pending" and row["number"] is None and row["draft"] is None
+    assert not list(archive.glob("draft-*"))
+
+
+def test_lookup_of_several_runs_is_one_client_call(tmp_path):
+    a, b = archived(tmp_path, "893.sb", sub="a"), archived(tmp_path, "113.be", sub="b")
+    run = FakeRun(tmp_path, rows=[SB_ROW, BE_ROW])
+    code, out, _ = looked_up([a, b], run)
+    assert code == 0 and len(run.lookups) == 1
+    assert run.lookups[0][2:] == ["--window", "BE=2026-11-05", "--window", "SB=2026-10-30", "--events",
+                                  "--job-status", "BE:INHDD6", "--job-status", "SB:INMBD6"]
+    assert {(r["kind"], r["status"]) for r in out} == {("sb", "found"), ("be", "found")}
+    assert {r["run"] for r in out} == {str(a), str(b)}
+
+
+def age_upload(archive, minutes):
+    path = archive / ".uploaded.json"
+    data = json.loads(path.read_text())
+    for entry in data.values():
+        entry["at"] = (datetime.now(mod.IST) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    path.write_text(json.dumps(data))
+
+
+def status_row(job, minutes_ago, desc="Message CHCAI02 for positive acknowledgment generated"):
+    stamp = (datetime.now(mod.IST) - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M:%S.123")
+    return {"jobNo": job, "inboundRecievedTimestamp": stamp, "statusDesc": desc}
+
+
+def test_lookup_not_received_when_job_status_has_nothing_since_the_upload(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    age_upload(archive, 10)
+    old = {"BE:INHDD6": [status_row("113", 600), status_row("999", 1)]}  # an earlier upload, and another job
+    run = FakeRun(tmp_path, rows=[], job_status=old)
+    _, [row], _ = looked_up([archive], run)
+    assert row["status"] == "not_received" and "never received" in row["note"] and row["number"] is None
+
+
+@pytest.mark.parametrize("minutes_old, rows", [
+    (2, {}),                                                         # too soon to say
+    (10, {"BE:INHDD6": [status_row("113", 8)]}),                     # received after the upload
+    (10, {"BE:INHDD6": None}),                                       # Job Status unreadable: stay pending
+])
+def test_lookup_stays_pending_unless_job_status_proves_it_never_arrived(tmp_path, minutes_old, rows):
+    archive = archived(tmp_path, "113.be")
+    age_upload(archive, minutes_old)
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], job_status=rows))
+    assert row["status"] == "pending"
+
+
+def test_lookup_ignores_header_validation_notices_of_a_duplicate_upload(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    duplicate = {**REJECTED, "detail": "header validation failed", "problem": "failed", "errors": ["duplicate"]}
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[duplicate]))
+    assert row["status"] == "pending" and row["notice"] is None
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[duplicate, REJECTED]))
+    assert row["status"] == "failed" and row["errors"] == ["820_SUPPDOCS"]
+
+
+def test_lookup_not_filed_carries_the_notice(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[NOT_FILED]))
+    assert row["status"] == "not_filed" and row["errors"] == [] and row["draft"] is None
+    assert row["notice"] == {"message": NOT_FILED["message"], "date": CREATED}
+    assert not (archive / "draft-error.html").exists()
+
+
+def test_lookup_failed_carries_every_error_and_writes_the_error_table(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    failed = {**REJECTED, "errors": ["820_SUPPDOCS", "131_IGMS <x>"]}
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[failed]))
+    assert row["status"] == "failed" and row["errors"] == ["820_SUPPDOCS", "131_IGMS <x>"]
+    assert row["notice"]["message"] == failed["message"] and row["draft"] == str(archive / "draft-error.html")
+    text = (archive / "draft-error.html").read_text()
+    assert "Job No" in text and "113_Signed.be" in text and "820_SUPPDOCS" in text and "131_IGMS &lt;x&gt;" in text
+
+
+def test_a_number_beats_an_old_rejection_and_a_later_acceptance_beats_it_too(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[BE_ROW], before=[REJECTED]))
+    assert row["status"] == "found"
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[ACCEPTED, REJECTED]))  # newest first
+    assert row["status"] == "pending"
+
+
+def test_lookup_partial_run_writes_no_table_and_says_so(tmp_path):
+    archive = archived(tmp_path, "893.sb", "894.sb")
+    other = archive / "894_Signed.sb"
+    other.write_text(other.read_text().replace("\x1d893\x1d", "\x1d894\x1d"), newline="")  # only 893 has a number
+    _, out, _ = looked_up([archive], FakeRun(tmp_path, rows=[SB_ROW]))
+    assert {r["job"]: r["status"] for r in out} == {"893": "found", "894": "pending"}
+    assert not (archive / "draft-sb.html").exists()
+    assert "no number yet" in next(r for r in out if r["job"] == "893")["note"]
+
+
+def test_lookup_flags_a_file_it_cannot_read_and_still_exits_zero(tmp_path):
+    archive = archived(tmp_path, "893.sb")
+    (archive / "893_Signed.sb").write_text("garbage")
+    code, [row], _ = looked_up([archive], FakeRun(tmp_path))
+    assert code == 0 and row["status"] == "unreadable" and row["job"] is None
+
+
+def test_lookup_refuses_a_folder_that_is_not_a_run(tmp_path):
+    folder = make(tmp_path, "893.sb")
+    with pytest.raises(mod.Stop, match="not a completed run"):
+        looked_up([folder], FakeRun(tmp_path))
+
+
+def test_lookup_fails_loudly_when_the_portal_cannot_be_reached(tmp_path):
+    archive = archived(tmp_path, "893.sb")
+
+    class Down(FakeRun):
+        def __call__(self, argv):
+            if argv[:2] == ["ecopy", "lookup"]:
+                return SimpleNamespace(returncode=1, stdout="", stderr="login failed")
+            return super().__call__(argv)
+
+    with pytest.raises(mod.Stop, match="login failed"):
+        looked_up([archive], Down(tmp_path))
+
+
+def test_main_lookup_prints_json_lines_and_exit_codes(tmp_path, monkeypatch, capsys):
+    archive = archived(tmp_path, "893.sb")
+    fake = FakeRun(tmp_path, rows=[SB_ROW])
+    monkeypatch.setattr(mod, "client_runner", lambda: fake)
+    assert mod.main(["--lookup", str(archive), "--json"]) == 0
+    [row] = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert row["status"] == "found"
+    for bad in (["--lookup", str(archive), "--yes"], ["--lookup", str(archive), "--dry-run"]):
+        assert mod.main(bad) == 1
+    monkeypatch.setattr(mod, "client_runner", lambda: (lambda argv: SimpleNamespace(returncode=1, stdout="", stderr="net down")))
+    assert mod.main(["--lookup", str(archive)]) == 1
+    assert "net down" in capsys.readouterr().err
+
+
+def test_main_parse_response_prints_the_clients_json(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def client(argv):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout='{"type": "nak"}\n', stderr="")
+    monkeypatch.setattr(mod, "client_runner", lambda: client)
+    assert mod.main(["--parse-response", "x.nak"]) == 0
+    assert capsys.readouterr().out == '{"type": "nak"}\n' and calls[0][0] == "parse-response" and calls[0][2] == "--json"
+    assert mod.main(["--parse-response", "x.nak", "--yes"]) == 1
+    monkeypatch.setattr(mod, "client_runner", lambda: (lambda argv: SimpleNamespace(returncode=1, stdout="", stderr="error: not an ICEGATE SB/BE result file")))
+    assert mod.main(["--parse-response", "x.nak"]) == 1
+    assert "not an ICEGATE" in capsys.readouterr().err
+
+
+def test_recheck_uses_one_lookup_and_writes_the_missing_table(tmp_path):
+    archive = archived(tmp_path, "893.sb")
+    run, said = FakeRun(tmp_path, rows=[SB_ROW]), []
+    mod.recheck(archive, run=run, say=said.append)
+    assert len([c for c in run.lookups if "--window" in c]) == 1
+    assert "8176055" in (archive / "draft-sb.html").read_text()
+
+
+def refiled(archive, fake, **kw):
+    said = []
+    code = mod.refile(archive, run=fake, say=said.append, **kw)
+    return code, said
+
+
+def uploads(fake):
+    return [c for c in fake.calls if c[:2] == ["filing", "upload"]]
+
+
+def test_refile_dry_run_sends_nothing_and_records_nothing(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    before = (archive / ".uploaded.json").read_text()
+    fake = FakeRun(tmp_path, rows=[], before=[NOT_FILED])
+    code, said = refiled(archive, fake, dry_run=True)
+    assert code == 0 and uploads(fake) == [] and any("would file again: 113_Signed.be" in s for s in said)
+    assert (archive / ".uploaded.json").read_text() == before
+
+
+def test_refile_needs_yes(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    fake = FakeRun(tmp_path, rows=[], before=[NOT_FILED])
+    with pytest.raises(mod.Stop, match="--yes"):
+        refiled(archive, fake)
+    assert uploads(fake) == []
+
+
+@pytest.mark.parametrize("rows, before", [([], [REJECTED]), ([], []), ([BE_ROW], [NOT_FILED]), ([], [ACCEPTED, NOT_FILED])])
+def test_refile_only_when_the_newest_notice_says_not_filed(tmp_path, rows, before):
+    archive = archived(tmp_path, "113.be")
+    fake = FakeRun(tmp_path, rows=rows, before=before)
+    with pytest.raises(mod.Stop, match="nothing to file again"):
+        refiled(archive, fake, yes=True)
+    assert uploads(fake) == []
+
+
+def test_refile_also_accepts_a_file_icegate_never_received(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    age_upload(archive, 10)
+    fake = FakeRun(tmp_path, rows=[], job_status={})
+    code, _ = refiled(archive, fake, yes=True)
+    assert code == 0 and len(uploads(fake)) == 2  # plan + confirm
+    with pytest.raises(mod.Stop, match="already filed again"):
+        refiled(archive, FakeRun(tmp_path, rows=[], job_status={}), yes=True)
+
+
+def test_refile_uploads_the_archived_signed_file_once_and_records_it_first(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    fake = FakeRun(tmp_path, rows=[], before=[NOT_FILED])
+    seen_at_send = []
+
+    class Spy(FakeRun):
+        def __call__(self, argv):
+            if "--confirm" in argv and argv[:2] == ["filing", "upload"]:  # the real send
+                seen_at_send.append(json.loads((archive / ".uploaded.json").read_text())["113_signed.be"].get("refile"))
+            return fake(argv)
+
+    code, said = refiled(archive, Spy(tmp_path), yes=True)
+    assert code == 0
+    plan, send = uploads(fake)
+    assert plan[2:] == [str(archive / "113_Signed.be"), "--dry-run"]
+    assert send[2:] == [str(archive / "113_Signed.be"), "--allow-duplicate", "--confirm", "FILE 1 abcdefabcdef"]
+    assert not any(c[0] in ("sign",) for c in fake.calls)
+    assert seen_at_send[0]["seen"] == 1  # recorded BEFORE the send, with the notices already there
+    entry = json.loads((archive / ".uploaded.json").read_text())["113_signed.be"]
+    assert entry["refile"]["plan_id"] == "abcdefabcdef"
+    assert any("icerun --lookup" in s for s in said)
+
+
+def test_a_second_refile_of_the_same_run_is_refused(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    refiled(archive, FakeRun(tmp_path, rows=[], before=[NOT_FILED]), yes=True)
+    fake = FakeRun(tmp_path, rows=[], before=[NOT_FILED, NOT_FILED])
+    with pytest.raises(mod.Stop, match="already filed again"):
+        refiled(archive, fake, yes=True)
+    assert fake.calls == []  # refused before even logging in
+
+
+def test_refile_refused_before_sending_is_not_counted(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    with pytest.raises(mod.Stop):
+        refiled(archive, FakeRun(tmp_path, rows=[], before=[NOT_FILED], fail_filing=True, filing_exit=1), yes=True)
+    assert "refile" not in json.loads((archive / ".uploaded.json").read_text())["113_signed.be"]
+    code, _ = refiled(archive, FakeRun(tmp_path, rows=[], before=[NOT_FILED]), yes=True)  # may be tried again
+    assert code == 0
+
+
+def test_refile_with_an_unknown_outcome_stays_recorded(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    with pytest.raises(mod.Unsure):
+        refiled(archive, FakeRun(tmp_path, rows=[], before=[NOT_FILED], fail_filing=True, filing_exit=2), yes=True)
+    assert "refile" in json.loads((archive / ".uploaded.json").read_text())["113_signed.be"]
+    with pytest.raises(mod.Stop, match="already filed again"):
+        refiled(archive, FakeRun(tmp_path, rows=[], before=[NOT_FILED]), yes=True)
+
+
+def test_lookup_after_a_refile_ignores_the_notices_from_before_it(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    refiled(archive, FakeRun(tmp_path, rows=[], before=[NOT_FILED]), yes=True)
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[NOT_FILED]))
+    assert row["status"] == "pending" and row["refiled"] is True
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[REJECTED, NOT_FILED]))  # a new one after the refile
+    assert row["status"] == "failed"
+
+
+def test_main_refile_honours_yes_and_dry_run(tmp_path, monkeypatch, capsys):
+    archive = archived(tmp_path, "113.be")
+    fake = FakeRun(tmp_path, rows=[], before=[NOT_FILED])
+    monkeypatch.setattr(mod, "client_runner", lambda: fake)
+    assert mod.main(["--refile", str(archive), "--dry-run"]) == 0 and uploads(fake) == []
+    assert mod.main(["--refile", str(archive)]) == 1 and uploads(fake) == []  # no --yes
+
+
+def test_filter_rows_matches_job_exactly_or_with_a_year_suffix_and_location():
+    rows = [{"jobNumber": "642", "location": "INMBD6"}, {"jobNumber": "64226", "location": "INMBD6"},
+            {"jobNumber": "700", "location": "INHDD6"}, {"jobNumber": "70026", "location": "INHDD6"}]
+    assert mod.filter_rows(rows, job="642") == [rows[0]]
+    assert mod.filter_rows(rows, job="700", loc="inhdd6") == [rows[2]]
+    assert mod.filter_rows([rows[1], rows[3]], job="642") == [rows[1]]
+    assert mod.filter_rows(rows, loc="INHDD6") == rows[2:]
+    assert mod.filter_rows(rows, job="64") == []
+
+
+def test_icerun_listing_filters_locally_from_one_fetch(tmp_path, monkeypatch, capsys):
+    calls = []
+    rows = [{**SB_ROW, "jobDate": "28-10-2026"}, {**SB_ROW, "jobNumber": "900", "docNumber": "5", "location": "INHDD6"}]
+
+    def runner(argv):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(rows), stderr="")
+
+    monkeypatch.setattr(mod, "client_runner", lambda: runner)
+    assert mod.main(["--sb", "--days", "7", "--job", "893", "--loc", "inmbd6"]) == 0
+    out = capsys.readouterr().out
+    assert calls == [["ecopy", "sb", "--days", "7", "--json"]] and "8176055" in out and "900" not in out
+    assert mod.main(["--sb", "--loc", "INHDD6", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == [rows[1]]
+    assert mod.main(["--notices", "--job", "893"]) == 1
+
+
+# ------------------------------------------------------------------ the notices baseline taken before every upload
+def ledger_entry(archive, name):
+    return json.loads((archive / ".uploaded.json").read_text())[name]
+
+
+def test_the_baseline_is_taken_before_the_upload_and_stored_even_with_wait_zero(tmp_path):
+    order = []
+
+    class Spy(FakeRun):
+        def __call__(self, argv):
+            order.append(["baseline"] if argv[:2] == ["ecopy", "lookup"] else ["send"] if "--confirm" in argv else argv[:2])
+            return super().__call__(argv)
+
+    archive = archived(tmp_path, "113.be", fake=Spy(tmp_path, before=[REJECTED, ACCEPTED]))
+    assert order.index(["baseline"]) < order.index(["send"])  # the plan (--dry-run) may come first
+    assert ledger_entry(archive, "113_signed.be")["baseline"] == {"seen": 2}
+
+
+def test_an_old_same_day_rejection_is_not_counted_after_a_wait_zero_upload(tmp_path):
+    archive = archived(tmp_path, "113.be", fake=FakeRun(tmp_path, before=[NOT_FILED]))  # already there at upload time
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[NOT_FILED]))
+    assert row["status"] == "pending" and row["notice"] is None and "no baseline" not in row["note"]
+    fake = FakeRun(tmp_path, rows=[], before=[NOT_FILED])
+    with pytest.raises(mod.Stop, match="nothing to file again"):  # never refiled on the strength of the old notice
+        refiled(archive, fake, yes=True)
+    assert uploads(fake) == []
+    # a notice that appeared after the upload does count
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[NOT_FILED, NOT_FILED]))
+    assert row["status"] == "not_filed"
+    fake = FakeRun(tmp_path, rows=[], before=[NOT_FILED, NOT_FILED])
+    assert refiled(archive, fake, yes=True)[0] == 0 and len(uploads(fake)) == 2
+
+
+def test_an_unreadable_baseline_still_uploads_and_stores_null_and_blocks_refile(tmp_path):
+    archive = archived(tmp_path, "113.be", fake=FakeRun(tmp_path, unreadable=1))
+    assert (archive / "113_Signed.be").exists() and ledger_entry(archive, "113_signed.be")["baseline"] is None
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[NOT_FILED]))
+    assert row["status"] == "not_filed" and "no baseline" in row["note"] and "--refile" not in row["note"]
+    fake = FakeRun(tmp_path, rows=[], before=[NOT_FILED])
+    with pytest.raises(mod.Stop, match="no baseline"):
+        refiled(archive, fake, yes=True)
+    assert fake.calls == []  # refused before logging in
+
+
+def test_a_run_from_before_baselines_existed_cannot_be_refiled(tmp_path):
+    archive = archived(tmp_path, "113.be")
+    data = json.loads((archive / ".uploaded.json").read_text())
+    data["113_signed.be"].pop("baseline")
+    (archive / ".uploaded.json").write_text(json.dumps(data))
+    with pytest.raises(mod.Stop, match="no baseline"):
+        refiled(archive, FakeRun(tmp_path, rows=[], before=[NOT_FILED]), yes=True, dry_run=True)
+    _, [row], _ = looked_up([archive], FakeRun(tmp_path, rows=[], before=[NOT_FILED]))
+    assert row["status"] == "not_filed" and "no baseline" in row["note"]
+
+
+def test_a_failed_baseline_in_a_waiting_run_is_stored_too(tmp_path):
+    folder = make(tmp_path, "113.be")
+    assert go(folder, tmp_path, FakeRun(tmp_path, rows=[BE_ROW], unreadable=1), said=lambda _: None) == 0
+    archive = next((folder / "Done").iterdir())
+    assert ledger_entry(archive, "113_signed.be")["baseline"] is None
+
+
+# ---------------------------------------------------------------- machine interface for the mail monitor
+def test_signer_runs_with_sign_all_in_terminal_set_so_no_window_opens(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["env"] = kw["env"]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    monkeypatch.delenv("SIGN_ALL_IN_TERMINAL", raising=False)
+    mod.sign_folder(tmp_path, tmp_path / "signer", lambda _: None)
+    assert seen["env"]["SIGN_ALL_IN_TERMINAL"] == "1"
+
+
+def usb(tmp_path, vendor, product):
+    dev = tmp_path / "usb" / f"1-{vendor}"
+    dev.mkdir(parents=True)
+    (dev / "idVendor").write_text(vendor + "\n")
+    (dev / "idProduct").write_text(product + "\n")
+    return tmp_path / "usb"
+
+
+def test_token_reports_presence_as_json_and_exit_code(tmp_path):
+    lines: list[str] = []
+    assert mod.token(lines.append, usb(tmp_path, "2ccf", "080a")) == 0
+    assert json.loads(lines[-1]) == {"token": "HYP2003", "usb": "2ccf:080a", "present": True}
+    assert mod.token(lines.append, usb(tmp_path / "other", "1234", "5678")) == 1
+    assert json.loads(lines[-1])["present"] is False
+    assert mod.token(lines.append, tmp_path / "no-such-sysfs") == 1
+
+
+def test_main_token(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(mod, "USB_DEVICES", usb(tmp_path, "2ccf", "080a"))
+    assert mod.main(["--token"]) == 0
+    assert json.loads(capsys.readouterr().out)["present"] is True
+    monkeypatch.setattr(mod, "USB_DEVICES", tmp_path / "empty")
+    assert mod.main(["--token"]) == 1
+    assert mod.main(["--token", "--yes"]) == 1  # takes no other arguments
+
+
+def test_drafts_lists_tables_of_job_folders_and_runs_in_reply_order(tmp_path, capsys):
+    job = tmp_path / "job"
+    run = job / "Done" / "20261128-120000-000001"
+    run.mkdir(parents=True)
+    (job / "Done" / "not-a-run").mkdir()
+    (job / "Done" / "not-a-run" / "draft-sb.html").write_text("x")
+    for kind in ("error", "be", "sb", "esanchit"):
+        (run / f"draft-{kind}.html").write_text(kind)
+    lines: list[str] = []
+    assert mod.list_drafts([str(job)], lines.append) == 0
+    rows = [json.loads(line) for line in lines]
+    assert [r["kind"] for r in rows] == ["esanchit", "sb", "be", "error"]
+    assert all(r["run"] == str(run) and r["draft"] == str(run / f"draft-{r['kind']}.html") for r in rows)
+    again: list[str] = []
+    mod.list_drafts([str(run)], again.append)  # a run folder itself works too
+    assert again == lines
+    with pytest.raises(mod.Stop, match="not a folder"):
+        mod.list_drafts([str(tmp_path / "missing")], lines.append)
+    assert mod.main(["--drafts", str(run)]) == 0
+    assert capsys.readouterr().out.splitlines() == lines
+    assert mod.main(["--drafts", str(run), "--dry-run"]) == 1
+
+
+def test_json_upload_prints_one_result_line_and_keeps_narration_on_stderr(tmp_path, monkeypatch, capsys):
+    folder = make(tmp_path, "Commercial Invoice 1.pdf", "893.sb")
+    fake = FakeRun(tmp_path)
+    monkeypatch.setattr(mod, "client_runner", lambda: fake)
+    assert mod.main([str(folder), "--yes", "--wait", "0", "--json", "--no-sign", "--type", "331000"]) == 0
+    out, err = capsys.readouterr()
+    [result] = [json.loads(line) for line in out.splitlines()]  # stdout: nothing but the one JSON line
+    archive = next((folder / "Done").iterdir())
+    assert result == {"ok": True, "runs": [
+        {"dir": str(archive), "kind": "esanchit", "files": ["Commercial_Invoice_1_Signed.pdf"],
+         "draft": str(archive / "draft-esanchit.html")},
+        {"dir": str(archive), "kind": "filing", "files": ["893_Signed.sb"], "draft": None}]}
+    assert (archive / "draft-esanchit.html").is_file()
+    assert "filing    893_Signed.sb" in err  # the narration is still there, on stderr
+
+
+def test_json_upload_failure_reports_what_was_already_uploaded(tmp_path, monkeypatch, capsys):
+    folder = make(tmp_path, "Commercial Invoice 1.pdf", "893.sb")
+    monkeypatch.setattr(mod, "client_runner", lambda: FakeRun(tmp_path, fail_filing=True))
+    assert mod.main([str(folder), "--yes", "--wait", "0", "--json", "--no-sign", "--type", "331000"]) == 1
+    out, err = capsys.readouterr()
+    result = json.loads(out.splitlines()[-1])
+    assert result["ok"] is False and "filing upload stopped" in result["error"]
+    assert [r["kind"] for r in result["runs"]] == ["esanchit"]  # eSANCHIT went in before the filing was refused
+    assert "stopped:" in err
+
+
+def test_json_upload_without_yes_is_refused_even_on_a_terminal(tmp_path, monkeypatch, capsys):
+    folder = make(tmp_path, "893.sb")
+    monkeypatch.setattr(mod, "client_runner", lambda: FakeRun(tmp_path))
+    monkeypatch.setattr(mod.sys.stdin, "isatty", lambda: True)
+    assert mod.main([str(folder), "--wait", "0", "--json", "--no-sign"]) == 1
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert result["ok"] is False and result["runs"] == [] and not (folder / "Done").exists()
+
+
+# ---- offering to delete an already-uploaded Done run so the file can be filed again
+class RedoUI(FakeUI):
+    """Answers the 'Delete that run' question with `redo` and every other confirmation with `confirm`."""
+
+    def __init__(self, redo=True, **kw):
+        super().__init__(**kw)
+        self.redo, self.redo_prompts = redo, []
+
+    def confirm(self, text):
+        if "Delete that run" in text:
+            self.redo_prompts.append(text)
+            return self.redo
+        return super().confirm(text)
+
+
+def uploaded_once(tmp_path, *names):
+    """Upload `names` (unsigned originals) once, then put the same originals back in the folder."""
+    folder = make(tmp_path, *names, signed=False)
+    contents = {n: (folder / n).read_text(newline="") for n in names}
+    assert go(folder, tmp_path, FakeRun(tmp_path), signer=fake_signer(tmp_path)) == 0
+    for n, body in contents.items():
+        (folder / n).write_text(body, newline="")
+    (done,) = [p for p in (folder / "Done").iterdir() if p.is_dir()]
+    return folder, done
+
+
+@pytest.fixture
+def no_gio(monkeypatch):
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+
+
+def test_interactive_yes_removes_the_run_forgets_it_and_uploads_again(tmp_path, no_gio):
+    folder, old = uploaded_once(tmp_path, "893.sb")
+    ui, run, said = RedoUI(redo=True), FakeRun(tmp_path), []
+    assert go(folder, tmp_path, run, ui=ui, yes=True, signer=fake_signer(tmp_path), said=said.append) == 0
+    (prompt,) = ui.redo_prompts
+    assert "Done/" + old.name in prompt and "893_Signed.sb" in prompt
+    assert "893.sb, 893_Signed.sb, draft-sb.html" in prompt            # everything in the run is listed
+    assert "SB 8176055" in prompt                                       # number already known from the draft
+    assert "second time" in prompt and "duplicate filing" in prompt
+    assert not old.exists() and (folder / "Done" / ".deleted" / old.name / "893_Signed.sb").is_file()
+    assert any(f"Done/.deleted/{old.name}" in s for s in said)
+    assert any("--confirm" in c for c in run.calls)                     # signed and uploaded in the same invocation
+    # the new run is the only one the ledger sees; the removed one is ignored (dot-folder) everywhere
+    (new,) = [p for p in (folder / "Done").iterdir() if p.is_dir() and not p.name.startswith(".")]
+    assert new != old and mod.Ledger(folder / "Done").seen(Path("893_Signed.sb"))["run"] == new.name
+    assert mod.completed_runs(folder) == [new]
+
+
+def test_ledger_forgets_a_removed_run_and_ignores_dot_folders(tmp_path, no_gio):
+    folder, old = uploaded_once(tmp_path, "893.sb")
+    done = folder / "Done"
+    ledger = mod.Ledger(done)
+    assert ledger.seen(Path("893_Signed.sb"))["run"] == old.name
+    mod.retire_run(old, done)
+    assert ledger.seen(Path("893_Signed.sb")) is not None               # in memory until reloaded
+    ledger.reload()
+    assert ledger.seen(Path("893_Signed.sb")) is None
+    assert mod.Ledger(done).seen(Path("893_Signed.sb")) is None         # a fresh process agrees
+
+
+def test_declining_the_offer_stops_with_the_same_message_and_changes_nothing(tmp_path, no_gio):
+    folder, old = uploaded_once(tmp_path, "893.sb")
+    ui, run = RedoUI(redo=False), FakeRun(tmp_path)
+    with pytest.raises(mod.Stop) as exc:
+        go(folder, tmp_path, run, ui=ui, signer=fake_signer(tmp_path))
+    assert str(exc.value) == (f"893.sb was already uploaded or its outcome is unknown (Done/{old.name}); "
+                              "delete that Done run to upload it again")
+    assert len(ui.redo_prompts) == 1 and run.calls == []
+    assert (old / "893_Signed.sb").is_file() and not (folder / "Done" / ".deleted").exists()
+
+
+def test_without_a_terminal_the_run_is_never_offered_for_deletion(tmp_path, no_gio):
+    folder, old = uploaded_once(tmp_path, "893.sb")
+    run = FakeRun(tmp_path)
+    with pytest.raises(mod.Stop) as exc:
+        go(folder, tmp_path, run, ui=None, yes=True, signer=fake_signer(tmp_path))
+    assert str(exc.value).startswith(f"893.sb was already uploaded or its outcome is unknown (Done/{old.name}); "
+                                     "delete that Done run to upload it again")
+    assert run.calls == [] and old.exists() and not (folder / "Done" / ".deleted").exists()
+
+
+def test_yes_flag_never_agrees_to_a_second_filing(tmp_path, no_gio):
+    folder, old = uploaded_once(tmp_path, "893.sb")
+    ui, run = RedoUI(redo=False), FakeRun(tmp_path)
+    with pytest.raises(mod.Stop, match="already uploaded"):
+        go(folder, tmp_path, run, ui=ui, yes=True, signer=fake_signer(tmp_path))
+    assert len(ui.redo_prompts) == 1                                    # asked despite --yes, default answer is no
+    assert run.calls == [] and old.exists()
+
+
+def test_the_real_prompt_defaults_to_no(monkeypatch):
+    seen = {}
+
+    class Q:
+        @staticmethod
+        def confirm(text, default):
+            seen["default"] = default
+            return SimpleNamespace(ask=lambda: False)
+
+    ui = mod.Prompts.__new__(mod.Prompts)
+    ui.q = Q
+    assert ui.confirm("Delete that run and upload again?") is False and seen["default"] is False
+
+
+def test_several_files_of_one_run_are_asked_about_once(tmp_path, no_gio):
+    folder, old = uploaded_once(tmp_path, "Commercial Invoice 1.pdf", "Customs invoice 2.pdf")
+    ui, run = RedoUI(redo=True), FakeRun(tmp_path)
+    assert go(folder, tmp_path, run, ui=ui, signer=fake_signer(tmp_path)) == 0
+    (prompt,) = ui.redo_prompts
+    assert "Commercial_Invoice_1_Signed.pdf" in prompt and "Customs_invoice_2_Signed.pdf" in prompt
+    assert "files them on ICEGATE a second time" in prompt
+    assert not old.exists()
+
+
+def test_two_runs_are_each_asked_and_one_no_removes_neither(tmp_path, no_gio):
+    folder, _first = uploaded_once(tmp_path, "Commercial Invoice 1.pdf")
+    (folder / "Commercial Invoice 1.pdf").unlink()
+    (folder / "Customs invoice 2.pdf").write_text("Customs invoice 2.pdf")
+    assert go(folder, tmp_path, FakeRun(tmp_path), signer=fake_signer(tmp_path)) == 0
+    (folder / "Commercial Invoice 1.pdf").write_text("Commercial Invoice 1.pdf")
+    (folder / "Customs invoice 2.pdf").write_text("Customs invoice 2.pdf")
+    runs = sorted(p for p in (folder / "Done").iterdir() if p.is_dir())
+    assert len(runs) == 2
+
+    class FirstYesThenNo(RedoUI):
+        def confirm(self, text):
+            answer = super().confirm(text) if "Delete that run" not in text else not self.redo_prompts
+            if "Delete that run" in text:
+                self.redo_prompts.append(text)
+            return answer
+
+    ui, run = FirstYesThenNo(), FakeRun(tmp_path)
+    with pytest.raises(mod.Stop, match="already uploaded"):
+        go(folder, tmp_path, run, ui=ui, signer=fake_signer(tmp_path))
+    assert len(ui.redo_prompts) == 2 and all(r.exists() for r in runs) and run.calls == []
+
+
+def test_retire_run_uses_gio_trash_when_it_works(tmp_path, monkeypatch):
+    folder, old = uploaded_once(tmp_path, "893.sb")
+    trash = tmp_path / "trash"
+    trash.mkdir()
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        Path(argv[2]).rename(trash / Path(argv[2]).name)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(mod.shutil, "which", lambda name: "/usr/bin/gio")
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    assert "trash" in mod.retire_run(old, folder / "Done")
+    assert calls == [["/usr/bin/gio", "trash", str(old)]] and (trash / old.name).is_dir()
+    assert not (folder / "Done" / ".deleted").exists()
+
+
+def test_retire_run_falls_back_to_done_deleted_when_gio_fails_and_never_overwrites(tmp_path, monkeypatch):
+    folder, old = uploaded_once(tmp_path, "893.sb")
+    done = folder / "Done"
+    (done / ".deleted" / old.name).mkdir(parents=True)                  # an earlier removal of the same name
+    monkeypatch.setattr(mod.shutil, "which", lambda name: "/usr/bin/gio")
+    monkeypatch.setattr(mod.subprocess, "run", lambda argv, **kw: SimpleNamespace(returncode=1, stdout="", stderr="no"))
+    said = mod.retire_run(old, done)
+    assert f"Done/.deleted/{old.name}.1" in said and (done / ".deleted" / f"{old.name}.1" / "893_Signed.sb").is_file()
+    assert not old.exists()
+
+
+def test_retire_run_refuses_anything_that_is_not_a_run_in_done(tmp_path, no_gio):
+    folder, _old = uploaded_once(tmp_path, "893.sb")
+    with pytest.raises(mod.Stop, match="refusing"):
+        mod.retire_run(folder, folder / "Done")
+    with pytest.raises(mod.Stop, match="refusing"):
+        mod.retire_run(folder / "Done", folder / "Done")

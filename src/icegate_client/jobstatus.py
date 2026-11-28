@@ -20,6 +20,29 @@ class JobStatusClient:
             raise IcegateError("job status report returned an error or empty response")
         return parse_xlsx(response.content)
 
+    def enquiry(self, kind: str, location: str) -> list[dict]:
+        """Enquiries > Job Status for one customs location: one row per file ICEGATE received there.
+
+        `kind` is "SB" or "BE". The portal answers HTTP 400 "No Record Found" for an empty list.
+        """
+        session = self.session
+        if session.role_id is None:
+            raise IcegateError("login did not provide a role for the job status enquiry")
+        response = session.send(
+            "POST", session.url(f"/enquiry/docenquiry/jobstatus/{kind.lower()}"),
+            json_body={"icegateId": session.settings.icegate_id, "roleId": session.role_id, "receiverId": location},
+            headers=session.auth_headers(), timeout=60,
+        )
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if response.status_code == 400 and "no record" in str(body).lower():
+            return []
+        if response.status_code != 200 or not isinstance(body, list):
+            raise IcegateError(f"job status enquiry failed with HTTP {response.status_code}")
+        return [row for row in body if isinstance(row, dict)]
+
     def _post(self, path: str):
         session = self.session
         if session.role_id is None or not session.user_type:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import tempfile
 from datetime import date
@@ -17,33 +18,60 @@ DOCUMENT_TYPES = {"SB": "SB", "BE": "BE", "GATEPASS": "LEOGate"}
 
 
 class ECopyCache:
-    """Remember the portal user ID for each searched IRN, scoped to an account."""
+    """Remember the portal user ID for each searched IRN, scoped to an account.
+
+    One small JSON index per account (IRN hash to user ID), rewritten only when a search brings something
+    new, so repeated polling writes nothing. Older per-IRN files are still read.
+    """
+
+    MAX_ENTRIES = 5000
 
     def __init__(self, state_dir: Path, account: str) -> None:
         account_hash = hashlib.sha256(account.casefold().encode()).hexdigest()
         self.directory = state_dir / "ecopy" / account_hash
+        self.index = self.directory / "index.json"
 
-    def _path(self, irn: str) -> Path:
-        return self.directory / hashlib.sha256(irn.encode()).hexdigest()
+    @staticmethod
+    def _key(irn: str) -> str:
+        return hashlib.sha256(irn.encode()).hexdigest()
+
+    def _load(self) -> dict[str, str]:
+        try:
+            data = json.loads(self.index.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)} if isinstance(data, dict) else {}
 
     def remember(self, rows: list[dict[str, Any]]) -> None:
+        known = self._load()
+        changed = False
         for row in rows:
             irn, user_id = row.get("irn"), row.get("userId")
             if not isinstance(irn, str) or not irn.strip() or not isinstance(user_id, str) or not user_id.strip():
                 continue
-            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd, temporary = tempfile.mkstemp(dir=self.directory, prefix=".ecopy-")
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as out:
-                    out.write(user_id)
-                os.replace(temporary, self._path(irn))
-            finally:
-                if os.path.exists(temporary):
-                    os.unlink(temporary)
+            key = self._key(irn)
+            if known.get(key) != user_id:
+                known.pop(key, None)  # newest entries last, so the oldest are dropped first
+                known[key] = user_id
+                changed = True
+        if not changed:
+            return
+        known = dict(list(known.items())[-self.MAX_ENTRIES:])
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, temporary = tempfile.mkstemp(dir=self.directory, prefix=".ecopy-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as out:
+                json.dump(known, out)
+            os.replace(temporary, self.index)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
     def user_id(self, irn: str) -> str | None:
-        try:
-            return self._path(irn).read_text(encoding="utf-8").strip() or None
+        if found := self._load().get(self._key(irn)):
+            return found.strip() or None
+        try:  # a file left by an older version
+            return (self.directory / self._key(irn)).read_text(encoding="utf-8").strip() or None
         except FileNotFoundError:
             return None
 

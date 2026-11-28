@@ -98,6 +98,8 @@ icegate ecopy search GATEPASS --from 2026-10-27 --to 2026-10-27 --json   # SB35 
 icegate report job-status --json                  # latest ~200 bills, every column
 icegate my-iec --json                             # all IEC clients
 icegate notifications --events                    # filing outcomes: submitted, rejected, validation failed
+icegate ecopy lookup --window SB=2026-10-28 --window BE=2026-11-05 --events   # one login: one search per kind + notices, JSON
+icegate parse-response FILE.nak --json            # offline: errors or numbers in an .ack/.nak ICEGATE mailed
 icegate enquiry sb --location INMBD6 --sb-no 6817710 --sb-date 2026-09-14 --json   # public, no login
 ```
 
@@ -129,6 +131,18 @@ with `outcome`, `doc`, `job`, `date`, `location` and `detail`). Add `--days <N>`
 the last N days (e.g. `--days 1` for today, `--days 2` for today and yesterday, `--days 7`, `--days 30`).
 Add `--json` for machine-readable JSON. `submitted` means accepted for processing, not final.
 Notifications have a date but no time.
+Each filing event also carries `problem` and `errors`. `problem: "not_filed"` is a bare rejection
+("... has been rejected." with no error code) or the portal's "error in processing ... try after some time":
+ICEGATE did not take the file and filing it again is the fix. `problem: "failed"` means the file itself has
+errors (a rejection with `Error code:` lines, or a Header, Field or DSC validation failure); `errors` holds each
+code or message exactly as ICEGATE wrote it, so it needs correcting before another upload.
+`ecopy lookup` logs in once and does the work of several commands for a script: repeat
+`--window KIND=DATE` (SB, BE, GATEPASS) to search each kind from that date up to today (`--to` changes the end),
+and add `--events` for the last 30 days of filing events. Repeat `--job-status KIND:LOCATION` (SB or BE) to also
+read Enquiries > Job Status of that location (the files ICEGATE received there) in the same login. It prints one JSON object
+`{"today", "ecopy": {kind: [rows]}, "events": [...] | null, "events_error": str | null, "job_status": {"SB:LOC": [rows] | null}}`;
+a failed notices fetch fills `events_error` and a failed Job Status read gives `null`; neither fails the searches. The local cache of portal user IDs for downloads is one
+`index.json` per account, not one file per record.
 
 `report job-status` prints the portal's latest ~200 Shipping Bills (no date
 filter), `my-iec` lists your IEC clients, and `enquiry sb` reads the public
@@ -208,10 +222,72 @@ Replace `FILE_PATH` with the path to your folder containing the files. The folde
    icerun check                      # Recent dashboard notifications (default: 1 day)
    icerun --notices                  # Recent dashboard notifications (default: 1 day)
    icerun check --days 2             # Notifications from last 2 days
-   icerun check sb --days 1          # Today's Shipping Bills from customs portal
+   icerun check sb                   # Today's Shipping Bills (--days 1, the default; --days 2 adds yesterday)
    icerun check sb --days 7          # Last 7 days of Shipping Bills
    icerun check be --days 30         # Last 30 days of Bills of Entry
+   icerun --sb --days 7 --job 893    # one fetch, filtered here: --job N (also N plus a two-digit year) and --loc CODE
+   icerun --be --days 30 --loc INHDD6 --json
    ```
+
+4. **Looking up and re-filing finished uploads:**
+   ```bash
+   icerun /path/to/folder --yes --wait 0        # upload and archive only: no waiting, no portal checks
+   icerun --lookup Done/<ts> [Done/<ts> ...]    # ONE login for all runs; one JSON line per SB/BE job
+   icerun --refile Done/<ts> --yes              # file a "not filed" / "not received" run again, once (--dry-run shows the plan)
+   icerun --parse-response FILE                 # offline: read an .ack/.nak ICEGATE mailed, one JSON line
+   ```
+   `--lookup` reads the signed `.sb`/`.be` files of the given completed runs, makes one portal lookup and
+   prints one JSON line per job on stdout (notes go to stderr):
+   `{"run", "file", "kind": "sb"|"be", "location", "job", "status", "number", "date", "draft", "note",
+   "notice": {"message", "date"} | null, "errors": [...], "refiled": bool}`. `status` is `found`
+   (number registered; `number` and `date` filled; the run's `draft-sb.html`/`draft-be.html` is written once
+   every job of that kind in the run is found and never overwritten), `pending` (nothing yet), `multiple`
+   (more than one matching record), `not_filed` (ICEGATE's newest notice says it did not take the file:
+   filing again is the fix), `not_received` (Job Status lists no row for this location and job received after the
+   upload time in `.uploaded.json`, and the upload is over 5 minutes old: ICEGATE never got the file; filing again
+   is the fix; if Job Status cannot be read the job stays `pending`), `failed` (errors in the file: `errors` has every line exactly as ICEGATE gives it,
+   and `draft-error.html` in the run folder lists Job No, file name and each error), or `unreadable` (location or job
+   not readable from the file). "Header validation failed" notices are ignored (a duplicate upload gets one, and it says
+   nothing about the first). A rejection counts only if its notice is newer than the upload (a later
+   "submitted" notice cancels an earlier rejection, and a number found beats a rejection). Exit 0 means the
+   lookup worked, whatever the statuses; exit 1 means login or network failure or a folder that is not a run.
+   Right before every filing upload (whatever `--wait` is) the script counts the notices ICEGATE already holds for
+   each SB/BE job and stores the count as `baseline` in `Done/<ts>/.uploaded.json`; `--lookup` and `--refile`
+   then count only notices newer than that. If the notices could not be read, the upload still goes ahead and
+   `baseline` is null: `--lookup` still reports the status with a "no baseline" note (judged by upload day
+   only), and `--refile` refuses ("no baseline ... check the notices by hand"). Runs made before this
+   existed have no baseline either.
+   `--refile` uploads the archived signed file again without signing, only when a job is `not_filed` or `not_received`, and at most once per run (recorded in `Done/<ts>/.uploaded.json` before sending, so
+   a second try or a crash cannot repeat it). It needs `--yes`.
+
+   `--parse-response FILE` reads the `.ack` or `.nak` result file that ICEGATE mails after an SB or BE upload
+   (offline, no login) and prints `{"type": "ack"|"nak", "doc": "SB"|"BE", "jobs": [{"location", "job", "job_date",
+   "number", "date", "errors": [...]}]}`. A nak lists each distinct error per job (a BE error names the IGM, MBL and
+   HBL it is about); an ack carries the SB or BE number and date (a BE ack has no job number). Anything that is not an
+   SB/BE result file exits 1.
+
+5. **Machine interface (for programs such as a mail monitor).** The caller never needs to know ICEGATE's
+   folder layout, token or signer details; it calls these and reads their output:
+   ```bash
+   icerun --token                                        # JSON line; exit 0 token plugged in, 1 not
+   icerun JOB_FOLDER --yes --type CODE --wait 0 --json   # sign + upload + archive; stdout = ONE JSON line
+   icerun --lookup RUN_DIR [RUN_DIR ...]                 # as above: one JSON line per SB/BE job
+   icerun --drafts DIR [DIR ...]                         # read only: the reply tables, one JSON line each
+   ```
+   - `--token`: `{"token": "HYP2003", "usb": "2ccf:080a", "present": true|false}`. Read only (sysfs).
+     `ICEGATE_TOKEN_USB=vendor:product` overrides the id.
+   - `--json` on an upload: narration goes to stderr, stdout holds exactly one final line
+     `{"ok": true, "runs": [{"dir": "/abs/Done/<ts>", "kind": "filing"|"esanchit", "files": ["name_Signed.ext", ...],
+     "draft": "/abs/Done/<ts>/draft-esanchit.html" | null}]}`. One entry per upload group; an eSANCHIT and an SB/BE
+     upload of one folder share the same `dir`. `draft` is the eSANCHIT reply table (it exists at once); it is always
+     `null` for `filing` (the numbers come later: `--lookup` returns each job's `draft`). When the run stops
+     (exit 1) the line is `{"ok": false, "error": "...", "runs": [...uploaded before the stop...]}`. `--json` never
+     prompts: it needs `--yes`. `--dry-run --json` prints `{"ok": true, "runs": []}`.
+   - `--drafts`: for each job folder (holding `Done/`) or completed run, one line
+     `{"run": dir, "kind": "esanchit"|"sb"|"be"|"error", "draft": path}`, ordered eSANCHIT, SB, BE, error. `error` is
+     the rejection table; reply wording is the caller's.
+   - The signer is always started with `SIGN_ALL_IN_TERMINAL=1`, so no terminal window opens whatever the caller's
+     environment; callers do not set it.
 
 ---
 
@@ -239,7 +315,12 @@ own dependencies are unchanged. It does this, in order:
    `"status": "unknown"`, and its files stay in the folder: check the portal and mail, then
    delete that Done run to allow another upload. A refusal before anything was sent (exit 1)
    records nothing. To upload a file again on purpose, delete the Done run that holds it;
-   deleting `Done` forgets everything.
+   deleting `Done` forgets everything. When a file you are about to sign matches an earlier run, an
+   interactive `icerun` lists every such run (all its files, any SB/BE number already known) and asks
+   "Delete that run and upload again?", default No, even with `--yes` (a second filing is never
+   automatic). On yes the run goes to the desktop trash (`gio trash`), else `Done/.deleted/<run>`
+   (dot-folders are not runs), and the same invocation signs and uploads. On no, without a terminal or
+   with `--json`, it stops as before.
    Signing is isolated to files that need it, so existing signed files are not replaced.
    If a run is cancelled after signing, it can resume while both files remain unchanged
    (the marker is `Done/.pending.json`, dropped once the files are recorded);
@@ -257,7 +338,7 @@ own dependencies are unchanged. It does this, in order:
    unknown outcome stops the run with "do not re-run".
 5. **Draft and archive.** It writes the reply as HTML tables (eSANCHIT from the
    receipt, SB and BE from an e-copy search using the location, job number and job date read from the SB or BE file; the number can take a couple of minutes to appear,
-   so it re-checks every 30 s for up to `--wait` seconds, default 600, and Ctrl-C skips it. Each check also reads ICEGATE's notifications: a rejection or validation failure for that job ends its wait at once, prints the portal's message and error code, and the run exits with an error after the other tables are made. Only notices that appear after the upload count, because job numbers repeat), copies each
+   so it re-checks every 60 s for up to `--wait` seconds, default 600 (`--wait 0` uploads and archives only, with no portal checks at all; look up later with `icerun --lookup`), and Ctrl-C skips it. Each round is one login that searches every kind from the file date to today and reads ICEGATE's notifications, and the whole table is filtered locally. A notice that the job was not filed, or failed with errors, ends its wait at once, prints the portal's message and every error, writes `draft-error.html` for failures, and the run exits with an error after the other tables are made. Only notices that appear after the upload count, because job numbers repeat), copies each
    table to the clipboard as rich text the moment it exists (IRN/DRN first, then the SB and BE tables when they appear; paste in between) (`wl-copy` or `xclip` on Linux, Windows PowerShell; macOS `osascript` is
    in the code but untested), and moves the
    originals, signed files and drafts into `Done/<timestamp>/` inside the folder. That
@@ -267,8 +348,8 @@ To show and copy tables from a completed run, use `upload "FILE_PATH" --recheck`
 replacing `FILE_PATH` with that run's specific `Done/<timestamp>` folder, wherever it is located.
 If both tables exist, both are printed and the
 last is copied; use `--table esanchit`, `--table sb` or `--table be` to copy one specifically.
-If an SB or BE table was not created, recheck makes one read-only lookup using the
-archived file, and reports any rejection the portal's notifications hold for that job. It never signs or uploads.
+If an SB or BE table was not created, recheck makes one read-only lookup (one login for all jobs and kinds) using the
+archived file, and reports any not-filed or failed notice the portal holds for that job. It never signs or uploads.
 Recheck performs one lookup by default; add `--wait 600` to wait up to ten minutes
 for a missing SB or BE number. An existing saved table is displayed without a network lookup.
 

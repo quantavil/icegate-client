@@ -239,3 +239,42 @@ def test_cli_notifications_invalid_days_and_conflicting_docs(monkeypatch, tmp_pa
 
 
 
+
+
+def test_bare_rejection_is_not_filed_and_a_rejection_with_codes_failed():
+    bare = msg('"Your shipping bill filing with job no. 952 dated 07112026 has been rejected.')
+    assert (bare["outcome"], bare["problem"], bare["errors"]) == ("rejected", "not_filed", [])
+    bad = msg('"Your bill of entry filing with job no. 112 dated 2026-11-05 has been rejected. '
+              'Error code: 349,708,,_MAIN,314_ITEMS\n-CBIC "')
+    assert bad["problem"] == "failed" and bad["errors"] == ["349,708,,_MAIN", "314_ITEMS"]
+    assert msg('"Your bill of entry filing with job no. 1 dated 05112026 has been rejected. Error code: 610_IGMS\n-CBIC "')["errors"] == ["610_IGMS"]
+    assert msg("Your bill of entry filing with job no. 1 dated 20261105 has been successfully submitted.")["problem"] is None
+
+
+def test_processing_error_asks_to_try_again_so_it_is_not_filed():
+    event = msg("Dear Sir/Madam,\nThere was an error in processing your file with control no. 9, filing date 20261105, "
+                "Receiver ID INHPI6, message ID CACHI01_A. Please try after some time.\nRegards,\nICEGATE Support Team")
+    assert (event["outcome"], event["problem"], event["errors"]) == ("failed", "not_filed", [])
+
+
+def test_field_errors_are_listed_one_per_field_and_header_failure_keeps_its_text():
+    event = msg("Dear Sir/Madam,\nField validation failed for control no. 721, filing date 20261103, Receiver ID INTKD6, "
+                "message ID CACHE1. Please use a valid input file.\n\n\nErrors: finalInvoiceModel[0].buyerAddress1: Buyer "
+                "Address 1 should not be more than length 50 and should only contain alphabet, numeric, special character, "
+                "finalSBModel[0].consigneeAddress1: Consignee Address 1 too long\n\nRegards,\nICEGATE Support Team")
+    assert event["problem"] == "failed" and event["errors"] == [
+        "finalInvoiceModel[0].buyerAddress1: Buyer Address 1 should not be more than length 50 and should only contain "
+        "alphabet, numeric, special character",
+        "finalSBModel[0].consigneeAddress1: Consignee Address 1 too long"]
+    head = msg("Dear Sir/Madam,\nHeader validation failed for control no. 5, filing date 20261103, Receiver ID INMBD6, "
+               "message ID CACHE1. Please use a valid input file.\nRegards,\nICEGATE Support Team")
+    assert head["errors"] == ["Header validation failed for control no. 5, filing date 20261103, Receiver ID INMBD6, "
+                              "message ID CACHE1. Please use a valid input file."]
+
+
+def test_older_field_validation_wording_without_date_is_parsed():
+    event = msg('Field validation failed for Job no 642 finalInvoiceModel[0].buyerAddress1: Buyer Address 1 is too long, '
+                'finalSBModel[0].portOfLoading: invalid port Please correct input data in the file & upload again.')
+    assert (event["job"], event["date"], event["problem"]) == ("642", None, "failed")
+    assert event["errors"] == ["finalInvoiceModel[0].buyerAddress1: Buyer Address 1 is too long",
+                               "finalSBModel[0].portOfLoading: invalid port"]

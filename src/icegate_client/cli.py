@@ -16,11 +16,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import __version__
-from .ecopy import ECopyCache, ECopyClient
+from .ecopy import DOCUMENT_TYPES, ECopyCache, ECopyClient
 from .enquiry import EnquiryClient
 from .jobstatus import JobStatusClient
 from .myiec import MyIecClient
 from .notifications import NotificationClient, filing_events, filter_by_days
+from .response import parse_response
 from .esanchit.client import EsanchitClient
 from .esanchit.doc_types import DocumentCatalog
 from .esanchit.page import StagedRow, split_option
@@ -642,6 +643,58 @@ def cmd_ecopy_search(ctx: Context, _args: argparse.Namespace | None = None) -> i
     return 0
 
 
+def cmd_ecopy_lookup(ctx: Context, _args: argparse.Namespace | None = None) -> int:
+    """One login: a date-range search per kind, plus the filing notifications; always JSON."""
+    args = ctx.args
+    windows: dict[str, date] = {}
+    for item in args.window or []:
+        kind, _, text = item.partition("=")
+        if kind.upper() not in DOCUMENT_TYPES or not text:
+            raise IcegateError("--window expects KIND=YYYY-MM-DD with KIND SB, BE or GATEPASS")
+        start = _date_arg(text)
+        windows[kind.upper()] = min(start, windows.get(kind.upper(), start))
+    job_status = []
+    for item in args.job_status or []:
+        kind, _, location = item.partition(":")
+        if kind.upper() not in ("SB", "BE") or not location:
+            raise IcegateError("--job-status expects KIND:LOCATION with KIND SB or BE")
+        job_status.append((kind.upper(), location.upper()))
+    if not windows and not args.events:
+        raise IcegateError("give at least one --window KIND=DATE or --events")
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    end = args.end_date or today
+    for kind, start in windows.items():
+        if start > end:
+            raise IcegateError(f"--window {kind} starts after the end date")
+    ctx.authenticate()
+    client = ECopyClient(ctx.session)
+    cache = ECopyCache(ctx.settings.state_dir, ctx.settings.icegate_id)
+    result: dict[str, object] = {"today": today.isoformat(), "ecopy": {}, "events": None, "events_error": None}
+    for kind, start in windows.items():
+        ctx.session.refresh_if_expiring()
+        rows = client.search_by_date(kind, start, end)
+        cache.remember(rows)
+        result["ecopy"][kind] = rows  # type: ignore[index]
+    if args.events:
+        try:
+            ctx.session.refresh_if_expiring()
+            body = NotificationClient(ctx.session).list("E")
+            result["events"] = filter_by_days(filing_events(body), days=30, is_events=True)
+        except IcegateError as exc:  # the number lookup is still useful without the notices
+            result["events_error"] = str(exc)
+    if job_status:
+        result["job_status"] = {}
+        for kind, location in dict.fromkeys(job_status):
+            try:
+                ctx.session.refresh_if_expiring()
+                rows = JobStatusClient(ctx.session).enquiry(kind, location)
+            except IcegateError:
+                rows = None  # unreadable: the caller must not guess
+            result["job_status"][f"{kind}:{location}"] = rows  # type: ignore[index]
+    print(_json(result, indent=2))
+    return 0
+
+
 def cmd_report_job_status(ctx: Context, _args: argparse.Namespace | None = None) -> int:
     ctx.authenticate()
     rows = JobStatusClient(ctx.session).detailed()
@@ -831,6 +884,24 @@ def cmd_doc_types(ctx: Context | None, args: argparse.Namespace) -> int:
         return 1
     for item in results:
         _say(str(item))
+    return 0
+
+
+def cmd_parse_response(ctx: Context | None, args: argparse.Namespace) -> int:
+    """Offline: read an .ack / .nak result file mailed by ICEGATE."""
+    try:
+        data = Path(args.file).expanduser().read_bytes()
+    except OSError as exc:
+        raise IcegateError(f"cannot read {args.file}: {exc.strerror}") from None
+    result = parse_response(data)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    for job in result["jobs"]:
+        _say(f"{result['doc']} {result['type']} {job['location']} job {job['job'] or '-'}"
+             + (f" no. {job['number']} dated {job['date']}" if job["number"] else ""))
+        for error in job["errors"]:
+            _say(f"  {error}")
     return 0
 
 
@@ -1040,6 +1111,15 @@ def build_parser() -> argparse.ArgumentParser:
         add_search_options(shortcut)
         shortcut.set_defaults(kind=kind)
 
+    lookup = ecopy_sub.add_parser("lookup", parents=[common], help="one login: several date searches and the filing notices, as JSON")
+    lookup.add_argument("--window", action="append", metavar="KIND=DATE",
+                        help="search KIND (SB, BE, GATEPASS) from DATE to --to (default today in India); repeatable")
+    lookup.add_argument("--to", dest="end_date", type=_date_arg, help="end date, YYYY-MM-DD (default: today in India)")
+    lookup.add_argument("--events", action="store_true", help="also read the filing outcomes from the notifications")
+    lookup.add_argument("--job-status", action="append", metavar="KIND:LOCATION",
+                        help="also read Enquiries > Job Status of KIND (SB or BE) at LOCATION; repeatable")
+    lookup.set_defaults(func=cmd_ecopy_lookup)
+
     download = ecopy_sub.add_parser("download", parents=[common], help="download a signed PDF or acknowledgement")
     download.add_argument("copy_type", nargs="?", choices=["signed", "ack"], default="signed")
     download.add_argument("--filename", help="downloadUrl filename for an acknowledgement")
@@ -1047,6 +1127,10 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--user-id", help="optional portal userId override; normally taken from search results")
     download.add_argument("-o", "--output", required=True, help="destination; existing files are not overwritten")
     download.set_defaults(func=cmd_ecopy_download)
+
+    parse = sub.add_parser("parse-response", parents=[common], help="read an .ack / .nak result file mailed by ICEGATE (offline)")
+    parse.add_argument("file", help="the .ack or .nak attachment")
+    parse.set_defaults(func=cmd_parse_response, no_context=True)
 
     doctor = sub.add_parser("doctor", parents=[common], help="check configuration and TLS")
     doctor.set_defaults(func=lambda ctx, args: cmd_doctor(None, args))

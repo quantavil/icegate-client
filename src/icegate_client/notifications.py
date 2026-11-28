@@ -41,6 +41,7 @@ _FILING = re.compile(
 _VALIDATION = re.compile(
     r"(Header|Field|DSC) validation failed for control no\.? (\d+), filing date " + _DATE
     + r", Receiver ID (\w+)", re.I)
+_JOB_VALIDATION = re.compile(r"Field validation failed for Job no\.? (\d+)\s+(.*?)\s*(?:Please correct input data.*)?$", re.I | re.S)
 _PROCESSING = re.compile(
     r"error in processing your file with control no\.? (\d+), filing date " + _DATE + r", Receiver ID (\w+)", re.I)
 
@@ -65,33 +66,72 @@ def _tidy(message: str) -> str:
     return text.strip('" ')
 
 
+_ERROR_PATH = re.compile(r",\s+(?=\w+(?:\[\d+\])?(?:\.\w+(?:\[\d+\])?)*:)")
+
+
+def _code_groups(codes: str) -> list[str]:
+    """Split a portal error-code string at each section tag, keeping the text as given.
+
+    ``349,708,,_MAIN,314_ITEMS`` is the codes of section MAIN followed by those of ITEMS.
+    """
+    groups, current = [], []
+    for token in codes.split(","):
+        current.append(token)
+        if re.search(r"_[A-Za-z]+$", token):
+            groups.append(",".join(current))
+            current = []
+    if any(t.strip() for t in current):
+        groups.append(",".join(current))
+    return [g.strip() for g in groups if g.strip()]
+
+
+def _field_errors(message: str, tidy: str) -> list[str]:
+    """Every field error of a validation notice (one per model path), or the notice itself when it lists none."""
+    if "Errors:" in message:
+        body = " ".join(message.split("Errors:", 1)[1].split())
+        body = re.sub(r"\s*Regards,?\s*ICEGATE Support Team\s*$", "", body)
+        return [e.strip() for e in _ERROR_PATH.split(body) if e.strip()]
+    return [tidy]
+
+
 def parse_notification(message: str) -> dict[str, Any] | None:
     """A filing outcome from one portal message, or None for anything else.
 
     ``outcome`` is ``submitted`` (accepted for processing, not final), ``rejected`` or ``failed``.
     ``job`` is the job number, or the control number for validation failures (they are the same file field).
+    ``problem`` tells the two bad kinds apart (``None`` for ``submitted``): ``not_filed`` is a rejection that
+    names no error (the portal did not file it) or a processing error that asks to try again later, so filing
+    it again is the fix; ``failed`` carries errors in the file, listed in ``errors``.
     """
     text = _tidy(message)
     if match := _FILING.search(message):
         kind, label, number, day, verdict, codes = match.groups()
         by_job = label.lower() == "job"
         rejected = verdict.lower() == "rejected"
+        has_codes = bool(rejected and codes and codes.strip())
         return {"outcome": "rejected" if rejected else "submitted", "doc": "SB" if kind.lower().startswith("s") else "BE",
                 "job": number if by_job else None, "number": None if by_job else number,
                 "date": _iso(day), "location": None,
-                "detail": f"error code {codes.strip()}" if rejected and codes and codes.strip() else "", "message": text}
+                "detail": f"error code {codes.strip()}" if has_codes else "", "message": text,
+                "problem": ("failed" if has_codes else "not_filed") if rejected else None,
+                "errors": _code_groups(codes.strip()) if has_codes else []}
     if match := _VALIDATION.search(message):
         stage, job, day, location = match.groups()
         extra = message.split("Errors:", 1)[1].strip() if "Errors:" in message else ""
         doc = "SB" if "cache" in message.lower() or "shipping bill" in message.lower() else ("BE" if "cachi" in message.lower() or "bill of entry" in message.lower() else None)
         return {"outcome": "failed", "doc": doc, "job": job, "number": None, "date": _iso(day), "location": location.upper(),
                 "detail": f"{stage.lower()} validation failed" + (f": {' '.join(extra.split())[:300]}" if extra else ""),
-                "message": text}
+                "message": text, "problem": "failed", "errors": _field_errors(message, text)}
+    if match := _JOB_VALIDATION.search(_tidy(message)):  # an older wording: no date or location, errors straight after the job
+        errors = [e.strip() for e in _ERROR_PATH.split(" ".join(match.group(2).split())) if e.strip()]
+        return {"outcome": "failed", "doc": None, "job": match.group(1), "number": None, "date": None, "location": None,
+                "detail": "field validation failed", "message": text, "problem": "failed", "errors": errors or [text]}
     if match := _PROCESSING.search(message):
         job, day, location = match.groups()
         doc = "SB" if "cache" in message.lower() or "shipping bill" in message.lower() else ("BE" if "cachi" in message.lower() or "bill of entry" in message.lower() else None)
         return {"outcome": "failed", "doc": doc, "job": job, "number": None, "date": _iso(day), "location": location.upper(),
-                "detail": "portal error while processing the file; check the portal before retrying", "message": text}
+                "detail": "portal error while processing the file; check the portal before retrying", "message": text,
+                "problem": "not_filed", "errors": []}
     return None
 
 

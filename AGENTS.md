@@ -68,8 +68,9 @@ hashes. Staging is ephemeral: the row lives in the current eSANCHIT
 | `src/icegate_client/esanchit/data/document_codes.txt` | bundled eSANCHIT codes |
 | `src/icegate_client/filing/client.py` | signed SB/BE filing upload and per-file receipts |
 | `src/icegate_client/ecopy.py` | read-only Shipping Bill, Bill of Entry and gatepass searches and downloads |
-| `src/icegate_client/jobstatus.py` | read-only Shipping Bill Job Status detailed report |
-| `src/icegate_client/notifications.py` | read-only dashboard notifications; parses filing outcomes (submitted, rejected, validation failed) |
+| `src/icegate_client/jobstatus.py` | read-only Shipping Bill Job Status detailed report, and the per-location Enquiries > Job Status rows (`enquiry`) |
+| `src/icegate_client/response.py` | offline reader of the `.ack`/`.nak` result files ICEGATE mails (`icegate parse-response`, `icerun --parse-response`) |
+| `src/icegate_client/notifications.py` | read-only dashboard notifications; parses filing outcomes (submitted, rejected, validation failed) and classifies them: `problem` is `not_filed` (file again) or `failed` (`errors` lists each code or message verbatim) |
 | `src/icegate_client/myiec.py` | read-only My IEC client list |
 | `src/icegate_client/enquiry.py` | public Shipping Bill enquiry, no login |
 | `scripts/icegate-run.py` | personal one-folder workflow: sign, upload via the CLI gates, draft, archive |
@@ -88,7 +89,7 @@ The e-copy date and job searches were live-tested for both SB and BE using the
 dashboard search endpoints. Signed PDFs for one SB and one BE were downloaded
 through the CLI using `/esanchit/getDocument` with the record’s `irn` and
 `userId`. The record's `userId` differs from the configured ICEGATE login;
-searches cache the record's ID locally by account and IRN so downloads can
+searches cache the record's ID locally by account and IRN (one `index.json` per account, written only when it changes, capped) so downloads can
 reuse it. Never replace it with the login ID. The separate `/dashboard-utility/download-utility/downloadAckFile`
 endpoint returned HTTP 409 for six acknowledgement files; do not claim it
 works until a successful response is observed. Date flags `--today` and `--yesterday` (also `--yestarday`)
@@ -106,7 +107,7 @@ Read-only reports (observed 2026-10-30, live-tested):
   no. N, filing date D, Receiver ID LOC`". D is YYYYMMDD, DDMMYYYY or YYYY-MM-DD. "`... with be no. / sb no. N`"
   and "`generated with BE/SB number N`" carry the document number, not the job. Job numbers repeat, so
   `icegate-run.py` judges a job only by notices that appear after its baseline taken before the upload.
-  A rejected or failed job ends the wait for its SB/BE number; BE numbers come from `ecopy search BE` by job
+  A not-filed or failed job ends the wait for its SB/BE number. Wording seen (digits masked): bare "`... filing with job no. 999 dated 99999999 has been rejected.`" and "`There was an error in processing your file with control no. 999 ... Please try after some time.`" mean ICEGATE did not take it (`not_filed`: filing again fixed it, a rejection was followed by "submitted"); "`... has been rejected. ... Error code: 999,999,,_MAIN,999_IGMS`", "`Header validation failed ... Please use a valid input file.`", "`Field validation failed ... Errors: finalSBModel[9].consigneeAddress9: ...`" and "`DSC validation failed ... Please use a valid DSC.`" are `failed`. BE numbers come from `ecopy search BE` by job
   (`docDate` can be `-`). The e-copy job date is the day ICEGATE processed the file, not the date inside it, so `icegate-run.py` finds SB and BE records with one date-range search from the file date to today, matching location and job number (the e-copy number can carry a two-digit year suffix).
 - Gatepass (SB35) is an e-copy kind: `documentType: "LEOGate"` on the same
   `searchByDate`/`searchByJobNumber` calls; CLI kind `GATEPASS`. The list holds the
@@ -268,7 +269,7 @@ and receipt path; a filing 202 is not final, the filing-status email decides.
 - The private signer (`scripts/sign-all.py`) owns the token and PIN. The script runs it as
   a separate program and never reads, prints or logs the PIN.
 - The client owns every portal gate. The script uses `--dry-run`, shows the plan, asks
-  the user once, then passes the printed challenge to `--confirm`. It never retries, passes `--allow-duplicate` on confirm (the client's state-dir receipts are not a guard here), and records uploaded signed names in each `Done/<run>/.uploaded.json` (the only memory, nothing global; the sign-resume marker is `Done/.pending.json`). An outcome the client reports as unknown (exit 2, 3, 130) is recorded there with `"status": "unknown"` and its files stay in the folder; exit 1 (refused before sending) records nothing. Deleting a Done run allows a redo; deleting `Done` forgets everything.
+  the user once, then passes the printed challenge to `--confirm`. It never retries, passes `--allow-duplicate` on confirm (the client's state-dir receipts are not a guard here), and records uploaded signed names in each `Done/<run>/.uploaded.json` (the only memory, nothing global; the sign-resume marker is `Done/.pending.json`). An outcome the client reports as unknown (exit 2, 3, 130) is recorded there with `"status": "unknown"` and its files stay in the folder; exit 1 (refused before sending) records nothing. Deleting a Done run allows a redo; deleting `Done` forgets everything. Interactively (a `Prompts` terminal, not `--json`), `offer_redo` collects every unsigned file whose hash matches an earlier run and asks once per run, default No and never answered by `--yes`, listing all files in the run and its known SB/BE numbers; yes calls `retire_run` (`gio trash`, else `Done/.deleted/<run>`, never a plain delete), `Ledger.reload()`, then signs and uploads in the same invocation. Without a terminal the Stop is unchanged. `Done/.deleted` and any dot-folder are not runs.
 - **Always flattened before signing (observed 2026-10-30).** The portal can answer `<name> is not a valid PDF file`
   for a structurally fine, validly signed Excel export; rewriting with pikepdf, Ghostscript or PyMuPDF changed
   nothing, but rasterising each page (120 dpi, grayscale JPEG, PyMuPDF) was accepted. Since 2026-11-12 the script rasterises in colour; the portal has not yet been observed accepting a colour flatten. A download with HTML glued
@@ -279,12 +280,32 @@ and receipt path; a filing 202 is not final, the filing-status email decides.
   JPEG quality) to leave an estimated allowance for signing; actual signed size can vary. If no profile fits,
   preparation stops. Existing signed files are preserved. Flattening loses selectable text. A portal refusal
   stops the run like any other exit 1; there is no retry.
-- After a filing upload it looks up the SB/BE number by job (`ecopy search`) and reads notifications each round;
-  a rejection ends that job's wait. It never reads notifications as 'read' and never resubmits.
+- After a filing upload it looks up the SB/BE numbers with `icegate ecopy lookup` (one login per round: one
+  date-range search per kind plus the notices; `match_rows` filters locally) every 60 s up to `--wait`; `--wait 0`
+  makes no check after the upload. Whatever `--wait` is, it first takes one notices baseline before sending and
+  stores `baseline: {"seen": N}` (or `null` if unreadable; the upload still goes ahead) per file in `.uploaded.json`;
+  `--lookup` and `--refile` count only notices past it, and `--refile` refuses a run with no baseline. A not-filed or failed notice ends that job's wait. `icerun --lookup RUN_DIR...`
+  does the same for finished runs in one login and prints one JSON line per job (status `found`, `pending`,
+  `multiple`, `not_filed`, `not_received`, `failed`, `unreadable`; `notice`, `errors`, `draft`); it never overwrites a draft and
+  writes `draft-error.html` for failures. "Header validation failed" notices (duplicate uploads) are ignored.
+  `not_received`: the same login also reads Job Status per location (`ecopy lookup --job-status KIND:LOC`); no row
+  for the job received at or after the upload time (`at` in `.uploaded.json`) and an upload over 5 minutes old; an
+  unreadable Job Status stays `pending`. `icerun --refile RUN_DIR --yes` re-uploads the archived signed
+  file (no signing) only when a job is `not_filed` or `not_received`, once per run: the `refile` record in
+  `.uploaded.json` is written before the send and a second refile is refused. Never run `--refile` for the user
+  unasked, and never read notifications as 'read'; no other resubmission exists.
 - The script owns only: the prompts and tables (questionary and rich, declared in its own header, not
   client dependencies), choosing codes from `document_codes.txt` (the user picks per
   file, the guess pre-selected; no terminal means only an unambiguous code), the reply
   draft and clipboard, and moving files into `Done/<timestamp>/`.
+
+### Machine interface
+
+Other programs (the Gmail monitor in `~/Documents/monitor`) use `icerun` as a tool and must not know ICEGATE
+internals. Anything about ICEGATE (token id, run-folder layout, file suffixes, notice wording, table files)
+belongs here, reached through `--token`, `--json` (upload), `--lookup` and `--drafts`; see the README, section
+"Machine interface", for the exact JSON. Keep those shapes stable and add fields rather than renaming. With `--json`,
+stdout carries only the final JSON line and every message goes to stderr. Never put a PIN or session value in them.
 
 ### Running it
 
